@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/shared/">
+    <Project Path="shared/RateLimiting.Abstractions/RateLimiting.Abstractions.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Level1.FixedWindow/Level1.FixedWindow.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Level1.Tests/Level1.Tests.csproj" />
+  </Folder>
+</Solution>
