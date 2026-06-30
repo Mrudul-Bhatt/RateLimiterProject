@@ -92,6 +92,61 @@ public sealed class FixedWindowRateLimiter : IRateLimiter
         }
     }
 
+    // --- Inspection surface (for the debug endpoint / dashboard; NOT part of IRateLimiter) -------
+
+    /// <summary>The configured ceiling per window.</summary>
+    public long Limit => _options.Limit;
+
+    /// <summary>The configured window length.</summary>
+    public TimeSpan Window => _options.Window;
+
+    /// <summary>
+    /// A read-only snapshot of one key's live state. <see cref="StoredCount"/> and
+    /// <see cref="StoredWindowStart"/> are the RAW values sitting in the dictionary — note they may
+    /// be stale: with lazy reset, a key whose window has elapsed keeps its old count until the next
+    /// request touches it. <see cref="WindowActive"/> tells you whether the stored window is the
+    /// current one; <see cref="Remaining"/> already accounts for a pending lazy reset.
+    /// </summary>
+    public record KeyState(
+        string Key,
+        long StoredCount,
+        DateTimeOffset StoredWindowStart,
+        bool WindowActive,
+        long Remaining,
+        DateTimeOffset ResetsAt);
+
+    /// <summary>
+    /// Snapshots the internal counter table so you can see exactly what the limiter is holding.
+    /// This is what makes the runtime internals observable — you're reading the live dictionary.
+    /// </summary>
+    public IReadOnlyList<KeyState> GetState()
+    {
+        var now = _timeProvider.GetUtcNow();
+        var currentWindow = AlignToWindow(now);
+        var states = new List<KeyState>(_counters.Count);
+
+        foreach (var (key, counter) in _counters)
+        {
+            long storedCount;
+            DateTimeOffset storedWindowStart;
+            lock (counter.SyncRoot)
+            {
+                storedCount = counter.Count;
+                storedWindowStart = counter.WindowStart;
+            }
+
+            var active = storedWindowStart == currentWindow;
+            // If the stored window isn't the current one, a lazy reset is pending — effective count is 0.
+            var effectiveCount = active ? storedCount : 0;
+            var remaining = Math.Max(0, _options.Limit - effectiveCount);
+            var resetsAt = currentWindow + _options.Window;
+
+            states.Add(new KeyState(key, storedCount, storedWindowStart, active, remaining, resetsAt));
+        }
+
+        return states;
+    }
+
     /// <summary>
     /// Snaps an instant down to the start of its aligned window. E.g. for a 10s window,
     /// 12:00:07 -> 12:00:00 and 12:00:13 -> 12:00:10. Alignment is relative to ticks=0 (the epoch).

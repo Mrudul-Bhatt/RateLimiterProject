@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Level 1 — Fixed Window Rate Limiter (live)</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --ink:#e6edf3; --muted:#8b98a5;
+          --ok:#2ea043; --block:#f85149; --line:#30363d; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+         background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+  .wrap { display:grid; grid-template-columns: 1fr 1fr; gap:16px; padding:16px 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
+              color:var(--muted); margin:0 0 10px; }
+  .full { grid-column: 1 / -1; }
+  button { font:inherit; background:#21262d; color:var(--ink); border:1px solid var(--line);
+           border-radius:6px; padding:8px 12px; cursor:pointer; margin-right:8px; }
+  button:hover { border-color:var(--accent); }
+  .gauges { display:flex; gap:24px; align-items:flex-end; }
+  .gauge .num { font-size:34px; font-weight:700; }
+  .gauge .lbl { color:var(--muted); font-size:11px; text-transform:uppercase; }
+  .bar { height:10px; background:#21262d; border-radius:5px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; background:var(--ok); transition:width .2s; }
+  #log { height:240px; overflow:auto; border:1px solid var(--line); border-radius:6px; }
+  .row { display:flex; gap:10px; padding:3px 10px; border-bottom:1px solid #161b22; white-space:nowrap; }
+  .row.ok   { color:#7ee787; }
+  .row.block{ color:#ffa198; }
+  .row .t { color:var(--muted); }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid #161b22; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; }
+  .pill { padding:1px 7px; border-radius:10px; font-size:11px; }
+  .pill.active { background:#16321f; color:#7ee787; }
+  .pill.stale  { background:#3a2a1a; color:#e3b341; }
+  canvas { width:100%; height:120px; display:block; background:#0b0f14; border-radius:6px; }
+  .legend { color:var(--muted); font-size:11px; margin-top:6px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Level 1 — Fixed Window Rate Limiter <span style="color:var(--muted)">· live view</span></h1>
+  <div class="sub">limit <b id="cfgLimit">?</b> requests per <b id="cfgWindow">?</b>s window ·
+    polling <code>/debug/state</code> · firing <code>/api/resource</code></div>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>Drive traffic</h2>
+    <button onclick="fire(1)">Send 1</button>
+    <button onclick="fire(5)">Send 5</button>
+    <button onclick="fire(20)">Burst 20 (concurrent)</button>
+    <button onclick="clearLog()">Clear log</button>
+    <div class="gauges" style="margin-top:18px">
+      <div class="gauge"><div class="num" id="gRemaining">–</div><div class="lbl">remaining</div></div>
+      <div class="gauge"><div class="num" id="gReset">–</div><div class="lbl">resets in (s)</div></div>
+      <div class="gauge"><div class="num" id="gTotal">0</div><div class="lbl">sent</div></div>
+      <div class="gauge"><div class="num" id="gBlocked" style="color:var(--block)">0</div><div class="lbl">blocked</div></div>
+    </div>
+    <div class="bar"><div id="remainingBar" style="width:100%"></div></div>
+    <p class="legend">Tip: watch <b>resets in</b>. Click <b>Send 5</b> with ~1s left, then <b>Send 5</b>
+      again right after it flips — you'll get 10 through in ~2s. That's the <b>boundary burst</b>.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Internal state · live dictionary snapshot</h2>
+    <table>
+      <thead><tr><th>key</th><th>stored count</th><th>window start</th><th>window</th><th>remaining</th></tr></thead>
+      <tbody id="stateBody"><tr><td colspan="5" style="color:var(--muted)">no keys yet — send a request</td></tr></tbody>
+    </table>
+    <p class="legend"><span class="pill stale">stale</span> = stored window has elapsed; a lazy reset
+      is pending and will fire on this key's next request. This is the lazy-reset mechanic, visible.</p>
+  </div>
+
+  <div class="panel full">
+    <h2>Timeline · last 20s</h2>
+    <canvas id="tl"></canvas>
+    <p class="legend">
+      <span class="dot" style="background:var(--ok)"></span> allowed (200) &nbsp;
+      <span class="dot" style="background:var(--block)"></span> blocked (429) &nbsp;
+      | vertical lines = window boundaries. A green cluster straddling a line = burst across the edge.
+    </p>
+  </div>
+</div>
+
+<script>
+const WINDOW_MS_FALLBACK = 10000;
+let windowMs = WINDOW_MS_FALLBACK;
+let totalSent = 0, totalBlocked = 0;
+const events = [];               // { t:ms, ok:bool }
+const VISIBLE_MS = 20000;
+
+async function fire(n) {
+  // Fire n requests concurrently so a "Burst 20" genuinely races them (exercises the lock).
+  const calls = Array.from({length:n}, () => hit());
+  await Promise.all(calls);
+}
+
+async function hit() {
+  totalSent++;
+  try {
+    const res = await fetch('/api/resource', { method:'GET' });
+    const ok = res.status === 200;
+    if (!ok) totalBlocked++;
+    events.push({ t: Date.now(), ok });
+    addLogRow(res, ok);
+    updateGauges(res, ok);
+  } catch (e) {
+    events.push({ t: Date.now(), ok:false });
+  }
+}
+
+function addLogRow(res, ok) {
+  const log = document.getElementById('log');
+  const div = document.createElement('div');
+  div.className = 'row ' + (ok ? 'ok' : 'block');
+  const rem = res.headers.get('X-RateLimit-Remaining');
+  const lim = res.headers.get('X-RateLimit-Limit');
+  const ra  = res.headers.get('Retry-After');
+  const now = new Date();
+  div.innerHTML = `<span class="t">${now.toLocaleTimeString()}.${String(now.getMilliseconds()).padStart(3,'0')}</span>`
+    + `<span>${ok ? '200 OK   ' : '429 BLOCK'}</span>`
+    + `<span>remaining ${rem ?? '?'}/${lim ?? '?'}</span>`
+    + (ra ? `<span>retry-after ${ra}s</span>` : '');
+  log.prepend(div);
+  while (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+function updateGauges(res, ok) {
+  document.getElementById('gTotal').textContent = totalSent;
+  document.getElementById('gBlocked').textContent = totalBlocked;
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+  events.length = 0; totalSent = 0; totalBlocked = 0;
+  updateGauges();
+}
+
+// Poll the live internal state every 400ms.
+async function poll() {
+  try {
+    const res = await fetch('/debug/state');
+    const s = await res.json();
+    windowMs = s.windowSeconds * 1000;
+    document.getElementById('cfgLimit').textContent = s.limit;
+    document.getElementById('cfgWindow').textContent = s.windowSeconds;
+
+    const body = document.getElementById('stateBody');
+    if (!s.keys.length) {
+      body.innerHTML = '<tr><td colspan="5" style="color:var(--muted)">no keys yet — send a request</td></tr>';
+    } else {
+      body.innerHTML = s.keys.map(k => {
+        const ws = new Date(k.storedWindowStart).toLocaleTimeString();
+        const pill = k.windowActive ? '<span class="pill active">active</span>'
+                                    : '<span class="pill stale">stale</span>';
+        return `<tr><td>${k.key}</td><td>${k.storedCount}</td><td>${ws}</td><td>${pill}</td><td>${k.remaining}</td></tr>`;
+      }).join('');
+
+      // Drive the remaining gauge + reset countdown off the most-constrained key.
+      const k = s.keys.reduce((a,b) => a.remaining <= b.remaining ? a : b);
+      const resetsIn = Math.max(0, (new Date(k.resetsAt) - new Date(s.now)) / 1000);
+      document.getElementById('gRemaining').textContent = k.remaining;
+      document.getElementById('gReset').textContent = resetsIn.toFixed(1);
+      const pct = Math.max(0, Math.min(100, (k.remaining / s.limit) * 100));
+      const bar = document.getElementById('remainingBar');
+      bar.style.width = pct + '%';
+      bar.style.background = pct < 25 ? 'var(--block)' : pct < 60 ? '#e3b341' : 'var(--ok)';
+    }
+  } catch (e) { /* server not up yet */ }
+}
+setInterval(poll, 400);
+poll();
+
+// --- Timeline canvas -------------------------------------------------------
+const cv = document.getElementById('tl');
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  ctx.clearRect(0,0,w,h);
+
+  const now = Date.now();
+  const t0 = now - VISIBLE_MS;
+  const x = t => ((t - t0) / VISIBLE_MS) * w;
+
+  // window boundaries (aligned to epoch; matches server for clean windows like 10s)
+  ctx.strokeStyle = '#30363d'; ctx.fillStyle = '#6e7681'; ctx.font = '10px monospace';
+  const firstBoundary = Math.ceil(t0 / windowMs) * windowMs;
+  for (let b = firstBoundary; b <= now; b += windowMs) {
+    const bx = x(b);
+    ctx.beginPath(); ctx.moveTo(bx, 0); ctx.lineTo(bx, h); ctx.stroke();
+    ctx.fillText(new Date(b).toLocaleTimeString().slice(-8), bx + 3, h - 4);
+  }
+
+  // playhead (now)
+  ctx.strokeStyle = '#58a6ff'; ctx.beginPath(); ctx.moveTo(w-1,0); ctx.lineTo(w-1,h); ctx.stroke();
+
+  // event dots
+  for (const e of events) {
+    if (e.t < t0) continue;
+    const ex = x(e.t);
+    const ey = e.ok ? h*0.4 : h*0.65;
+    ctx.fillStyle = e.ok ? '#2ea043' : '#f85149';
+    ctx.beginPath(); ctx.arc(ex, ey, 4, 0, Math.PI*2); ctx.fill();
+  }
+  // prune old events
+  while (events.length && events[0].t < now - VISIBLE_MS) events.shift();
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+
+<div class="wrap" style="padding-top:0">
+  <div class="panel full">
+    <h2>Request log (newest first)</h2>
+    <div id="log"></div>
+  </div>
+</div>
+</body>
+</html>

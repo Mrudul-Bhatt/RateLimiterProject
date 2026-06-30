@@ -17,6 +17,11 @@ builder.Services.AddSingleton<IRateLimiter, FixedWindowRateLimiter>();
 
 var app = builder.Build();
 
+// Serve the live dashboard (wwwroot/index.html) BEFORE the limiter so loading the page and its
+// assets never consumes quota. UseDefaultFiles maps "/" -> index.html.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 // The limiter runs as middleware so it protects every endpoint placed after it.
 app.UseMiddleware<RateLimitingMiddleware>();
 
@@ -27,7 +32,22 @@ app.MapGet("/api/resource", () => Results.Ok(new
     servedAt = DateTimeOffset.UtcNow
 }));
 
-app.MapGet("/", () => "Level 1 — Fixed Window Rate Limiter. Try GET /api/resource");
+// --- Debug/observability endpoint -----------------------------------------
+// Exposes the limiter's live internal state so the dashboard can visualise it. The middleware
+// exempts "/debug/*" from limiting so polling this doesn't perturb what it's measuring.
+app.MapGet("/debug/state", (IRateLimiter limiter, TimeProvider clock) =>
+{
+    if (limiter is not FixedWindowRateLimiter fixedWindow)
+        return Results.Problem("State inspection is only available for FixedWindowRateLimiter.");
+
+    return Results.Ok(new
+    {
+        limit = fixedWindow.Limit,
+        windowSeconds = fixedWindow.Window.TotalSeconds,
+        now = clock.GetUtcNow(),
+        keys = fixedWindow.GetState()
+    });
+});
 
 app.Run();
 

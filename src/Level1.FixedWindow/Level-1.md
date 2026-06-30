@@ -192,16 +192,57 @@ downstream endpoint writes the body), not just on the 429.
 
 ---
 
-## 8. Gotcha observed while running
+## 8. What the middleware limits (and what it doesn't)
 
-When demoing with `curl`, the limiter allowed only **4** requests to `/api/resource` before the
-`429`, not 5 — because the boot-probe request to `/` consumed one token from the same IP bucket.
-That's correct behaviour: `/` is *also* behind the middleware. There's no bypass/whitelist yet —
-that's introduced in Level 5. Lesson: *everything behind the middleware counts against the limit.*
+The limiter is middleware, so by default it counts **every** request that reaches it — including a
+plain `GET /`. Order in the pipeline therefore matters: anything registered *before* the limiter
+middleware (or explicitly exempted inside it) is not limited.
+
+Two deliberate carve-outs exist for the tooling:
+- **Static files** (`UseStaticFiles` runs before the limiter) → loading the dashboard at `/` is free.
+- **`/debug/*`** (exempted inside the middleware) → polling internal state doesn't perturb it.
+
+Everything else — notably `/api/*` — is limited. Early on, before these carve-outs, a boot-probe to
+`/` was silently eating a token from the IP bucket (only 4 of 5 reached `/api/resource`). That was a
+useful lesson: *if it passes through the middleware, it counts.* Real route/path-based policies and
+whitelists arrive in **Level 5**; the carve-outs here are intentionally minimal.
 
 ---
 
-## 9. Tests (xUnit)
+## 9. Seeing it work at runtime (observability)
+
+Three layers were added so the limiter's internals are observable while it runs — without reaching
+for the full Prometheus/Grafana stack (that's Level 7).
+
+**1. Decision logging** — [RateLimitingMiddleware.cs](./RateLimitingMiddleware.cs) logs every decision:
+`ALLOW` at Information, `BLOCK` at Warning. A burst lights up the console as it crosses the limit:
+```
+ALLOW  ip:::1 GET /api/resource  remaining=2/5 resetsAt=19:30:50
+BLOCK  ip:::1 GET /api/resource  limit=5 retryAfter=00:00:03
+```
+
+**2. `GET /debug/state`** — dumps the **live internal dictionary**: each key's raw `storedCount`,
+`storedWindowStart`, whether that window is still `windowActive`, and the effective `remaining`.
+This is the "peek inside the data structure" view. `storedCount` can be *stale* — with lazy reset a
+key keeps its old count until its next request touches it; `windowActive=false` flags that a reset
+is pending. The middleware exempts `/debug/*` so polling it never consumes quota.
+
+**3. Live dashboard** — [wwwroot/index.html](./wwwroot/index.html), served at `/`. Vanilla JS, no
+dependencies. It fires requests, reads the `X-RateLimit-*` headers, polls `/debug/state`, and draws:
+- a **remaining gauge** + **countdown to window reset**,
+- the **internal state table** (with active/stale pills — the lazy-reset mechanic made visible),
+- a **timeline canvas**: green dots = allowed, red = blocked, vertical lines = window boundaries.
+
+**How to *see* the boundary burst:** watch the "resets in" countdown. Click **Send 5** with ~1s
+left, then **Send 5** again the instant it flips. Ten requests clear in ~2 seconds — a green cluster
+straddling a boundary line on the timeline. That's the flaw from §3, live.
+
+> Note: the dashboard is a single-machine learning tool. It draws window boundaries on the client
+> clock; locally that matches the server, but it is not the production observability story (L7 is).
+
+---
+
+## 10. Tests (xUnit)
 
 | Test | Asserts |
 |---|---|
@@ -216,18 +257,25 @@ that's introduced in Level 5. Lesson: *everything behind the middleware counts a
 
 ---
 
-## 10. Run it
+## 11. Run it
 
 ```bash
 # from the solution root
 dotnet test                                                   # all 8 tests
 dotnet run --project src/Level1.FixedWindow --urls http://localhost:5080
+```
 
-# in another terminal — watch the 429 and headers appear
+Then open **http://localhost:5080/** for the live dashboard, or drive it from the shell:
+
+```bash
+# watch the 429 and headers appear
 for i in $(seq 1 6); do
   curl -s -D - -o /dev/null http://localhost:5080/api/resource \
     | grep -iE 'HTTP/|X-RateLimit|Retry-After'
 done
+
+# peek at the live internal dictionary (does NOT consume quota)
+curl -s http://localhost:5080/debug/state | python3 -m json.tool
 ```
 
 Configurable via `appsettings.json` / env: `RateLimit:Limit` (default 5) and
