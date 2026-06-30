@@ -9,8 +9,10 @@ and documents the *flaw it exposes* and the *flaw the next level fixes*.
 ```
 RateLimiterProject/
 ├── shared/RateLimiting.Abstractions/   # IRateLimiter + RateLimitResult — the contract every level implements
-├── src/Level1.FixedWindow/             # L1: fixed-window counter (this level)
-└── tests/Level1.Tests/                 # L1: unit + integration tests
+├── src/Level1.FixedWindow/             # L1: fixed-window counter
+├── src/Level2.SlidingWindowLog/        # L2: sliding-window log
+├── bench/MemoryBenchmark/              # L1 vs L2 memory footprint harness
+└── tests/                              # Level1.Tests, Level2.Tests
 ```
 
 ## Build & test
@@ -67,4 +69,38 @@ dictionary, so the effective limit becomes `Limit × instances`. Redis + atomic 
 
 ---
 
-*Next: Level 2 — sliding window log, which eliminates the boundary burst (at a memory cost).*
+## Level 2 — Sliding Window Log ✅
+
+**Stack:** in-memory, ASP.NET Core minimal API. No Redis. Full notes: [Level-2.md](src/Level2.SlidingWindowLog/Level-2.md).
+
+### What it does
+Keeps a per-key FIFO queue of request timestamps. Each request evicts entries older than
+`now - window`, then admits only if fewer than `Limit` remain. The window is always *the last N
+seconds, measured now* — so there are no fixed edges to exploit.
+
+### The payoff
+**The boundary burst is eliminated.** The exact scenario that was a passing "bug" test in Level 1
+(`Demonstrates_boundary_burst`) now correctly **blocks** the overage (`Eliminates_boundary_burst`).
+
+### The cost (measured — `dotnet run --project bench/MemoryBenchmark -c Release`)
+| reqs/key | total reqs | FixedWindow | SlidingLog | ratio |
+|---|---|---|---|---|
+| 10    | 10,000     | ~410 KB | 762 KB  | 1.8× |
+| 100   | 100,000    | ~410 KB | 2.5 MB  | 6.1× |
+| 1,000 | 1,000,000  | ~410 KB | 16.1 MB | 40.2× |
+
+Memory is **O(requests-in-window) per key** vs fixed window's O(1). It also needs a **cleanup
+`IHostedService`** to reclaim idle keys — maintenance fixed window never required.
+
+### Tests (9)
+`Eliminates_boundary_burst`, `Evicts_stale_timestamps`, `RemoveExpiredKeys_drops_fully_expired_idle_keys`,
+`Cleanup_service_removes_idle_keys`, plus the standard allow/block/reset/isolation/concurrency set.
+
+### Interview takeaway
+> Sliding log is exact and kills the boundary burst, but costs O(requests-in-window) memory per key
+> plus a cleanup job. In production prefer the sliding-window *counter* hybrid (O(1), ~as accurate)
+> or push the log into Redis sorted sets (which also gives atomicity + TTL expiry across instances).
+
+---
+
+*Next: Level 3 — token bucket & leaky bucket: burst absorption vs. perfectly smooth output rate.*

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Level 2 — Sliding Window Log (live)</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --ink:#e6edf3; --muted:#8b98a5;
+          --ok:#2ea043; --block:#f85149; --line:#30363d; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;
+         background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+  .wrap { display:grid; grid-template-columns: 1fr 1fr; gap:16px; padding:16px 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
+              color:var(--muted); margin:0 0 10px; }
+  .full { grid-column: 1 / -1; }
+  button { font:inherit; background:#21262d; color:var(--ink); border:1px solid var(--line);
+           border-radius:6px; padding:8px 12px; cursor:pointer; margin-right:8px; }
+  button:hover { border-color:var(--accent); }
+  .gauges { display:flex; gap:24px; align-items:flex-end; }
+  .gauge .num { font-size:34px; font-weight:700; }
+  .gauge .lbl { color:var(--muted); font-size:11px; text-transform:uppercase; }
+  .bar { height:10px; background:#21262d; border-radius:5px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; background:var(--ok); transition:width .2s; }
+  #log { height:240px; overflow:auto; border:1px solid var(--line); border-radius:6px; }
+  .row { display:flex; gap:10px; padding:3px 10px; border-bottom:1px solid #161b22; white-space:nowrap; }
+  .row.ok   { color:#7ee787; }
+  .row.block{ color:#ffa198; }
+  .row .t { color:var(--muted); }
+  table { width:100%; border-collapse:collapse; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid #161b22; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; }
+  canvas { width:100%; height:120px; display:block; background:#0b0f14; border-radius:6px; }
+  .legend { color:var(--muted); font-size:11px; margin-top:6px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle; }
+  .swatch { display:inline-block; width:14px; height:8px; vertical-align:middle; border-radius:2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Level 2 — Sliding Window Log <span style="color:var(--muted)">· live view</span></h1>
+  <div class="sub">limit <b id="cfgLimit">?</b> requests per trailing <b id="cfgWindow">?</b>s ·
+    tracked keys <b id="cfgKeys">0</b> · the window slides — there is no edge to exploit</div>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>Drive traffic</h2>
+    <button onclick="fire(1)">Send 1</button>
+    <button onclick="fire(5)">Send 5</button>
+    <button onclick="fire(20)">Burst 20 (concurrent)</button>
+    <button onclick="clearLog()">Clear log</button>
+    <div class="gauges" style="margin-top:18px">
+      <div class="gauge"><div class="num" id="gRemaining">–</div><div class="lbl">remaining</div></div>
+      <div class="gauge"><div class="num" id="gReset">–</div><div class="lbl">slot frees in (s)</div></div>
+      <div class="gauge"><div class="num" id="gTotal">0</div><div class="lbl">sent</div></div>
+      <div class="gauge"><div class="num" id="gBlocked" style="color:var(--block)">0</div><div class="lbl">blocked</div></div>
+    </div>
+    <div class="bar"><div id="remainingBar" style="width:100%"></div></div>
+    <p class="legend">Contrast with Level 1: send 5, wait 1s, send 5 again — they still get
+      <b>blocked</b>. The first batch is still inside the trailing window, so the burst can't sneak
+      across a boundary. A slot only frees when its original request slides out the back.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Internal state · per-key request log</h2>
+    <table>
+      <thead><tr><th>key</th><th>count in window</th><th>oldest age (s)</th><th>remaining</th></tr></thead>
+      <tbody id="stateBody"><tr><td colspan="4" style="color:var(--muted)">no keys yet — send a request</td></tr></tbody>
+    </table>
+    <p class="legend"><b>count in window</b> = number of stored timestamps still inside the trailing
+      window. This is the O(requests) memory cost — it grows with traffic, not just with key count.</p>
+  </div>
+
+  <div class="panel full">
+    <h2>Timeline · last 20s</h2>
+    <canvas id="tl"></canvas>
+    <p class="legend">
+      <span class="dot" style="background:var(--ok)"></span> allowed &nbsp;
+      <span class="dot" style="background:var(--block)"></span> blocked &nbsp;
+      <span class="swatch" style="background:rgba(88,166,255,.15);border:1px solid #1f3b5c"></span>
+      trailing window (slides with "now"). A request is blocked when this band already holds the limit.
+    </p>
+  </div>
+</div>
+
+<script>
+let windowMs = 10000;
+let totalSent = 0, totalBlocked = 0;
+const events = [];
+const VISIBLE_MS = 20000;
+
+async function fire(n) {
+  await Promise.all(Array.from({length:n}, () => hit()));
+}
+
+async function hit() {
+  totalSent++;
+  try {
+    const res = await fetch('/api/resource', { method:'GET' });
+    const ok = res.status === 200;
+    if (!ok) totalBlocked++;
+    events.push({ t: Date.now(), ok });
+    addLogRow(res, ok);
+    document.getElementById('gTotal').textContent = totalSent;
+    document.getElementById('gBlocked').textContent = totalBlocked;
+  } catch (e) {
+    events.push({ t: Date.now(), ok:false });
+  }
+}
+
+function addLogRow(res, ok) {
+  const log = document.getElementById('log');
+  const div = document.createElement('div');
+  div.className = 'row ' + (ok ? 'ok' : 'block');
+  const rem = res.headers.get('X-RateLimit-Remaining');
+  const lim = res.headers.get('X-RateLimit-Limit');
+  const ra  = res.headers.get('Retry-After');
+  const now = new Date();
+  div.innerHTML = `<span class="t">${now.toLocaleTimeString()}.${String(now.getMilliseconds()).padStart(3,'0')}</span>`
+    + `<span>${ok ? '200 OK   ' : '429 BLOCK'}</span>`
+    + `<span>remaining ${rem ?? '?'}/${lim ?? '?'}</span>`
+    + (ra ? `<span>retry-after ${ra}s</span>` : '');
+  log.prepend(div);
+  while (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+  events.length = 0; totalSent = 0; totalBlocked = 0;
+  document.getElementById('gTotal').textContent = 0;
+  document.getElementById('gBlocked').textContent = 0;
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/debug/state');
+    const s = await res.json();
+    windowMs = s.windowSeconds * 1000;
+    document.getElementById('cfgLimit').textContent = s.limit;
+    document.getElementById('cfgWindow').textContent = s.windowSeconds;
+    document.getElementById('cfgKeys').textContent = s.trackedKeys;
+
+    const body = document.getElementById('stateBody');
+    const nowServer = new Date(s.now);
+    if (!s.keys.length) {
+      body.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">no keys yet — send a request</td></tr>';
+    } else {
+      body.innerHTML = s.keys.map(k => {
+        const age = k.oldestAt ? ((nowServer - new Date(k.oldestAt)) / 1000).toFixed(1) : '–';
+        return `<tr><td>${k.key}</td><td>${k.countInWindow}</td><td>${age}</td><td>${k.remaining}</td></tr>`;
+      }).join('');
+
+      const k = s.keys.reduce((a,b) => a.remaining <= b.remaining ? a : b);
+      document.getElementById('gRemaining').textContent = k.remaining;
+      // For a sliding log, a slot frees when the oldest entry slides out: (oldest + window) - now.
+      const freesIn = k.oldestAt ? Math.max(0, (new Date(k.oldestAt).getTime() + windowMs - nowServer.getTime())/1000) : 0;
+      document.getElementById('gReset').textContent = (k.remaining > 0 ? 0 : freesIn).toFixed(1);
+      const pct = Math.max(0, Math.min(100, (k.remaining / s.limit) * 100));
+      const bar = document.getElementById('remainingBar');
+      bar.style.width = pct + '%';
+      bar.style.background = pct < 25 ? 'var(--block)' : pct < 60 ? '#e3b341' : 'var(--ok)';
+    }
+  } catch (e) {}
+}
+setInterval(poll, 400);
+poll();
+
+const cv = document.getElementById('tl');
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  ctx.clearRect(0,0,w,h);
+
+  const now = Date.now();
+  const t0 = now - VISIBLE_MS;
+  const x = t => ((t - t0) / VISIBLE_MS) * w;
+
+  // The sliding window: a shaded band of width `windowMs` ending at "now". This is what moves.
+  const bandStart = x(now - windowMs);
+  ctx.fillStyle = 'rgba(88,166,255,.13)';
+  ctx.fillRect(bandStart, 0, w - bandStart, h);
+  ctx.strokeStyle = '#1f3b5c';
+  ctx.beginPath(); ctx.moveTo(bandStart, 0); ctx.lineTo(bandStart, h); ctx.stroke();
+
+  // playhead (now)
+  ctx.strokeStyle = '#58a6ff'; ctx.beginPath(); ctx.moveTo(w-1,0); ctx.lineTo(w-1,h); ctx.stroke();
+
+  for (const e of events) {
+    if (e.t < t0) continue;
+    const ex = x(e.t);
+    const ey = e.ok ? h*0.4 : h*0.65;
+    ctx.fillStyle = e.ok ? '#2ea043' : '#f85149';
+    ctx.beginPath(); ctx.arc(ex, ey, 4, 0, Math.PI*2); ctx.fill();
+  }
+  while (events.length && events[0].t < now - VISIBLE_MS) events.shift();
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+
+<div class="wrap" style="padding-top:0">
+  <div class="panel full">
+    <h2>Request log (newest first)</h2>
+    <div id="log"></div>
+  </div>
+</div>
+</body>
+</html>
