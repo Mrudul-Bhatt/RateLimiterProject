@@ -40,7 +40,7 @@ public sealed class SlidingWindowLogRateLimiter : IRateLimiter
 {
     private readonly SlidingWindowLogOptions _options;
     private readonly TimeProvider _timeProvider;
-    private readonly long _windowMs;
+    private readonly long _windowMs; // window size in milliseconds
 
     private readonly ConcurrentDictionary<string, Log> _logs = new();
 
@@ -127,8 +127,7 @@ public sealed class SlidingWindowLogRateLimiter : IRateLimiter
                 isEmpty = log.Timestamps.Count == 0;
             }
 
-            if (isEmpty &&
-                ((IDictionary<string, Log>)_logs).Remove(new KeyValuePair<string, Log>(key, log)))
+            if (isEmpty && ((IDictionary<string, Log>)_logs).Remove(new KeyValuePair<string, Log>(key, log)))
             {
                 removed++;
             }

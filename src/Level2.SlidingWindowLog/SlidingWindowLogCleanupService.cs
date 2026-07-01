@@ -38,8 +38,7 @@ public sealed class SlidingWindowLogCleanupService : BackgroundService
         // PeriodicTimer(TimeSpan, TimeProvider) lets tests advance a FakeTimeProvider to fire ticks.
         using var timer = new PeriodicTimer(_interval, _timeProvider);
 
-        while (!stoppingToken.IsCancellationRequested &&
-               await timer.WaitForNextTickAsync(stoppingToken))
+        while (!stoppingToken.IsCancellationRequested && await timer.WaitForNextTickAsync(stoppingToken))
         {
             try
             {

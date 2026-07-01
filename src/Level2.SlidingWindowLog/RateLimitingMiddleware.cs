@@ -28,6 +28,7 @@ public sealed class RateLimitingMiddleware
         if (context.Request.Path.StartsWithSegments("/debug"))
         {
             await _next(context);
+            // we don't want to run below logic for debug endpoint
             return;
         }
 
