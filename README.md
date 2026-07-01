@@ -11,8 +11,10 @@ RateLimiterProject/
 ├── shared/RateLimiting.Abstractions/   # IRateLimiter + RateLimitResult — the contract every level implements
 ├── src/Level1.FixedWindow/             # L1: fixed-window counter
 ├── src/Level2.SlidingWindowLog/        # L2: sliding-window log
+├── src/Level3.Buckets/                 # L3: token bucket & leaky bucket
 ├── bench/MemoryBenchmark/              # L1 vs L2 memory footprint harness
-└── tests/                              # Level1.Tests, Level2.Tests
+├── bench/BucketComparison/            # L3 token-vs-leaky output comparison
+└── tests/                              # Level1.Tests, Level2.Tests, Level3.Tests
 ```
 
 ## Build & test
@@ -103,4 +105,38 @@ Memory is **O(requests-in-window) per key** vs fixed window's O(1). It also need
 
 ---
 
-*Next: Level 3 — token bucket & leaky bucket: burst absorption vs. perfectly smooth output rate.*
+## Level 3 — Token Bucket & Leaky Bucket ✅
+
+**Stack:** in-memory, ASP.NET Core minimal API. Full notes: [Level-3.md](src/Level3.Buckets/Level-3.md).
+
+### What it does
+Two algorithms side by side, given identical `(capacity, rate)` so the only variable is the
+algorithm. Both are back to **O(1) state per key** (no per-request log, no cleanup job — the costs L2 introduced).
+
+- **Token bucket** — tokens accrue up to capacity and refill lazily; a burst drains them fast.
+  Absorbs bursts, bounds the average. State: `{ double Tokens, DateTimeOffset LastRefill }`.
+- **Leaky bucket** — implemented via **GCRA / virtual scheduling** (O(1), one TAT timestamp per key).
+  Accepts up to capacity but releases at a fixed cadence; overflow is dropped.
+
+### The contrast (`dotnet run --project bench/BucketComparison -c Release`)
+Same burst of 10 at t=0, capacity 5, rate 2/s:
+```
+  token: #.............................   <- all 5 leave at once (BURSTY output)
+  leaky: o....o....o....o....o.........   <- one every 500ms (SMOOTH output)
+```
+**Subtlety:** on a single instantaneous burst both admit the *same count* (they're admission duals);
+they differ in **output shaping** — token releases immediately, leaky paces it.
+
+### Tests (9)
+`TokenBucket_allows_burst_up_to_capacity`, `TokenBucket_refills_over_time`,
+`LeakyBucket_drops_overflow`, `LeakyBucket_enforces_constant_output_rate`,
+`LeakyBucket_smooths_a_burst_into_evenly_spaced_releases`, plus accrual-cap / average-rate / recovery / concurrency.
+
+### Interview takeaway
+> Both bound the average; on a burst they admit the same count. The difference is output shaping —
+> token bucket lets bursts through (APIs tolerating spikes), leaky bucket paces output (protecting a
+> fragile downstream). Implement leaky bucket with GCRA: O(1) state, same math as ATM / Redis throttle.
+
+---
+
+*Next: Level 4 — Redis-backed atomic counter: correctness across N instances via Lua atomicity. This is where "single-process only" finally gets fixed.*

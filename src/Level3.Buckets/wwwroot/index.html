@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Level 3 — Token vs Leaky Bucket (live)</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --ink:#e6edf3; --muted:#8b98a5;
+          --ok:#2ea043; --block:#f85149; --line:#30363d; --accent:#58a6ff; --token:#d29922; --leaky:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+  .controls { padding:14px 24px; border-bottom:1px solid var(--line); }
+  button { font:inherit; background:#21262d; color:var(--ink); border:1px solid var(--line);
+           border-radius:6px; padding:8px 12px; cursor:pointer; margin-right:8px; }
+  button:hover { border-color:var(--accent); }
+  .wrap { display:grid; grid-template-columns: 1fr 1fr; gap:16px; padding:16px 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .panel h2 { font-size:13px; margin:0 0 4px; }
+  .panel .tag { font-size:11px; color:var(--muted); margin-bottom:10px; }
+  .token h2 { color:var(--token); } .leaky h2 { color:var(--leaky); }
+  .gauges { display:flex; gap:20px; align-items:flex-end; margin-bottom:10px; }
+  .gauge .num { font-size:30px; font-weight:700; }
+  .gauge .lbl { color:var(--muted); font-size:11px; text-transform:uppercase; }
+  canvas { width:100%; height:150px; display:block; background:#0b0f14; border-radius:6px; }
+  .legend { color:var(--muted); font-size:11px; margin-top:6px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Level 3 — Token Bucket vs Leaky Bucket <span style="color:var(--muted)">· live, side by side</span></h1>
+  <div class="sub">both configured identically (capacity <b id="cfgCap">?</b>, rate <b id="cfgRate">?</b>/s) —
+    the only difference is the algorithm</div>
+</header>
+
+<div class="controls">
+  <button onclick="fire(1)">Send 1 (to both)</button>
+  <button onclick="fire(10)">Burst 10 (to both)</button>
+  <button onclick="fire(3)">Send 3</button>
+  <button onclick="clearAll()">Clear</button>
+  <span class="legend" style="margin-left:12px">
+    <span class="dot" style="background:var(--ok)"></span> accepted &nbsp;
+    <span class="dot" style="background:var(--block)"></span> rejected/dropped &nbsp;
+    | the line is the bucket level over time</span>
+</div>
+
+<div class="wrap">
+  <div class="panel token">
+    <h2>Token Bucket</h2>
+    <div class="tag">tokens accrue up to capacity · a burst drains them fast · <b>absorbs bursts, limits average</b></div>
+    <div class="gauges">
+      <div class="gauge"><div class="num" id="tTokens">–</div><div class="lbl">tokens left</div></div>
+      <div class="gauge"><div class="num" id="tAcc">0</div><div class="lbl">accepted</div></div>
+      <div class="gauge"><div class="num" id="tRej" style="color:var(--block)">0</div><div class="lbl">rejected</div></div>
+    </div>
+    <canvas id="tCanvas"></canvas>
+    <p class="legend">Line = tokens available. A burst drops it to zero instantly (that's the burst
+      getting through); it then climbs back at the refill rate.</p>
+  </div>
+
+  <div class="panel leaky">
+    <h2>Leaky Bucket</h2>
+    <div class="tag">a queue draining at a constant rate · overflow is dropped · <b>smooth output</b></div>
+    <div class="gauges">
+      <div class="gauge"><div class="num" id="lDepth">–</div><div class="lbl">queue depth</div></div>
+      <div class="gauge"><div class="num" id="lAcc">0</div><div class="lbl">accepted</div></div>
+      <div class="gauge"><div class="num" id="lRej" style="color:var(--block)">0</div><div class="lbl">dropped</div></div>
+    </div>
+    <canvas id="lCanvas"></canvas>
+    <p class="legend">Line = queue depth. A burst fills it; it then drains linearly at the fixed leak
+      rate. Accepted requests leave downstream smoothly, not all at once.</p>
+  </div>
+</div>
+
+<script>
+let cap = 5, rate = 2;
+const state = {
+  token: { events: [], level: [], acc: 0, rej: 0 },
+  leaky: { events: [], level: [], acc: 0, rej: 0 },
+};
+const VISIBLE_MS = 15000;
+
+async function fire(n) {
+  const calls = [];
+  for (let i = 0; i < n; i++) { calls.push(hit('token', '/api/token')); calls.push(hit('leaky', '/api/leaky')); }
+  await Promise.all(calls);
+}
+
+async function hit(which, url) {
+  try {
+    const res = await fetch(url);
+    const ok = res.status === 200;
+    const s = state[which];
+    s.events.push({ t: Date.now(), ok });
+    if (ok) s.acc++; else s.rej++;
+    document.getElementById(which === 'token' ? 'tAcc' : 'lAcc').textContent = s.acc;
+    document.getElementById(which === 'token' ? 'tRej' : 'lRej').textContent = s.rej;
+  } catch (e) {}
+}
+
+function clearAll() {
+  for (const k of ['token','leaky']) { state[k].events = []; state[k].level = []; state[k].acc = 0; state[k].rej = 0; }
+  ['tAcc','tRej','lAcc','lRej'].forEach(id => document.getElementById(id).textContent = 0);
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/debug/state');
+    const s = await res.json();
+    cap = s.token.capacity; rate = s.token.refillPerSecond;
+    document.getElementById('cfgCap').textContent = cap;
+    document.getElementById('cfgRate').textContent = rate;
+
+    const now = Date.now();
+    const tok = s.token.keys[0]?.tokens ?? cap;
+    const lea = s.leaky.keys[0]?.queueDepth ?? 0;
+    document.getElementById('tTokens').textContent = tok.toFixed(1);
+    document.getElementById('lDepth').textContent = lea.toFixed(1);
+    state.token.level.push({ t: now, v: tok });
+    state.leaky.level.push({ t: now, v: lea });
+    for (const k of ['token','leaky']) {
+      while (state[k].level.length && state[k].level[0].t < now - VISIBLE_MS) state[k].level.shift();
+    }
+  } catch (e) {}
+}
+setInterval(poll, 200);
+poll();
+
+function drawOne(canvasId, s, color, invert) {
+  const cv = document.getElementById(canvasId);
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr, dpr);
+  ctx.clearRect(0,0,w,h);
+
+  const now = Date.now(), t0 = now - VISIBLE_MS;
+  const x = t => ((t - t0) / VISIBLE_MS) * w;
+  const pad = 18;
+  // level maps 0..cap to canvas height (leave room for dots at the bottom)
+  const y = v => (h - pad) - (Math.max(0, Math.min(cap, v)) / cap) * (h - pad - 6);
+
+  // capacity guide line
+  ctx.strokeStyle = '#233043'; ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(0, y(cap)); ctx.lineTo(w, y(cap)); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = '#6e7681'; ctx.font = '10px monospace'; ctx.fillText('capacity', 4, y(cap) - 4);
+
+  // level line
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  s.level.forEach((p, i) => { const px = x(p.t), py = y(p.v); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+  ctx.stroke(); ctx.lineWidth = 1;
+
+  // accept/reject dots along the bottom
+  for (const e of s.events) {
+    if (e.t < t0) continue;
+    ctx.fillStyle = e.ok ? '#2ea043' : '#f85149';
+    ctx.beginPath(); ctx.arc(x(e.t), h - 8, 3.5, 0, Math.PI*2); ctx.fill();
+  }
+  while (s.events.length && s.events[0].t < now - VISIBLE_MS) s.events.shift();
+
+  // playhead
+  ctx.strokeStyle = '#30363d'; ctx.beginPath(); ctx.moveTo(w-1,0); ctx.lineTo(w-1,h); ctx.stroke();
+}
+
+function draw() {
+  drawOne('tCanvas', state.token, '#d29922');
+  drawOne('lCanvas', state.leaky, '#58a6ff');
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

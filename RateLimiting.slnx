@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/bench/">
+    <Project Path="bench/BucketComparison/BucketComparison.csproj" />
     <Project Path="bench/MemoryBenchmark/MemoryBenchmark.csproj" />
   </Folder>
   <Folder Name="/shared/">
@@ -8,9 +9,11 @@
   <Folder Name="/src/">
     <Project Path="src/Level1.FixedWindow/Level1.FixedWindow.csproj" />
     <Project Path="src/Level2.SlidingWindowLog/Level2.SlidingWindowLog.csproj" />
+    <Project Path="src/Level3.Buckets/Level3.Buckets.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Level1.Tests/Level1.Tests.csproj" />
     <Project Path="tests/Level2.Tests/Level2.Tests.csproj" />
+    <Project Path="tests/Level3.Tests/Level3.Tests.csproj" />
   </Folder>
 </Solution>
