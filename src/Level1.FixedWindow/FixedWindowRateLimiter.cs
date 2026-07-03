@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using RateLimiting.Abstractions;
 
 namespace Level1.FixedWindow;
@@ -39,12 +40,14 @@ public sealed class FixedWindowRateLimiter : IRateLimiter
 {
     private readonly FixedWindowOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly ILogger? _logger;
 
     // One entry per client key. ConcurrentDictionary handles concurrent *adds* safely; the
     // per-entry lock (inside Counter) handles concurrent *mutation* of an existing counter.
     private readonly ConcurrentDictionary<string, Counter> _counters = new();
 
-    public FixedWindowRateLimiter(FixedWindowOptions options, TimeProvider timeProvider)
+    // Logger is optional so unit tests can construct the limiter without a DI container.
+    public FixedWindowRateLimiter(FixedWindowOptions options, TimeProvider timeProvider, ILogger? logger = null)
     {
         if (options.Limit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "Limit must be positive.");
@@ -53,13 +56,17 @@ public sealed class FixedWindowRateLimiter : IRateLimiter
 
         _options = options;
         _timeProvider = timeProvider;
+        _logger = logger;
     }
 
     public Task<RateLimitResult> CheckAsync(string key, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(key);
 
+        // Numbers below trace limit=5, window=10s, with requests arriving in the window
+        // [12:00:00, 12:00:10). Windows are aligned to the wall clock (see AlignToWindow).
         var now = _timeProvider.GetUtcNow();
+        // AlignToWindow snaps now down to the 10s boundary: 12:00:03 -> 12:00:00.
         var currentWindowStart = AlignToWindow(now);
         var counter = _counters.GetOrAdd(key, _ => new Counter());
 
@@ -71,23 +78,33 @@ public sealed class FixedWindowRateLimiter : IRateLimiter
             // Lazy reset: if we've crossed into a new aligned window since this key was last seen,
             // zero the counter and adopt the new window. No background timer — the reset happens
             // on access, which keeps the boundary-burst flaw front and centre.
+            // e.g. a request at 12:00:12 has currentWindowStart=12:00:10, which != the stored
+            // 12:00:00, so Count resets 5 -> 0 and we adopt the new window.
             if (counter.WindowStart != currentWindowStart)
             {
                 counter.WindowStart = currentWindowStart;
                 counter.Count = 0;
             }
 
+            // resetsAt = WindowStart + window = 12:00:00 + 10s = 12:00:10.
             var resetsAt = counter.WindowStart + _options.Window;
 
-            if (counter.Count < _options.Limit)
+            if (counter.Count < _options.Limit)   // req1: 0<5 ... req5: 4<5 (yes); req6: 5<5 (no)
             {
-                counter.Count++;
-                var remaining = _options.Limit - counter.Count;
+                counter.Count++;                              // 0->1, 1->2, ... 4->5
+                var remaining = _options.Limit - counter.Count; // req1:4  req2:3  req3:2  req4:1  req5:0
+                _logger?.LogInformation(
+                    "FIXED ALLOW {Key}  count={Count}/{Limit}  window={WindowStart:HH:mm:ss}  remaining={Remaining}",
+                    key, counter.Count, _options.Limit, counter.WindowStart, remaining);
                 return Task.FromResult(RateLimitResult.Allow(_options.Limit, remaining, resetsAt));
             }
 
-            // Over the limit for this window. Tell the caller exactly how long to wait.
+            // Over the limit for this window (req6 at 12:00:05: Count=5). Wait until the window resets:
+            // retryAfter = resetsAt(12:00:10) - now(12:00:05) = 5s.
             var retryAfter = resetsAt - now;
+            _logger?.LogWarning(
+                "FIXED BLOCK {Key}  count={Count}/{Limit}  retryAfter={RetryAfter}",
+                key, counter.Count, _options.Limit, retryAfter);
             return Task.FromResult(RateLimitResult.Block(_options.Limit, resetsAt, retryAfter));
         }
     }

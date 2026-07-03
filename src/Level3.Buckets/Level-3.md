@@ -28,6 +28,29 @@ wait 2.5s          -> +5 tokens (2/s) -> 5 more ACCEPTED
 This is the most common API limiter (AWS, Stripe-style): it tolerates occasional spikes while
 bounding the long-run average.
 
+### Tokens are fractional — and the `Retry-After` math
+
+`Tokens` is a **`double`**, not an int. Refill is continuous — `(elapsed × rate)` accrues smoothly —
+so at any instant the bucket usually holds a fraction like `0.4`. You can only *spend* a whole token
+(1 request = 1 token), so a request is rejected when `Tokens < 1.0`. But the client isn't starting
+from empty; it's partway to the next token. The blocked branch computes exactly how long that wait is:
+
+```csharp
+// Not enough for one token. Time until we accrue the fraction we're short.
+var deficit = 1.0 - bucket.Tokens;                    // how much more to reach a full token
+var retryAfter = TimeSpan.FromSeconds(deficit / _options.RefillPerSecond);
+```
+
+- **`deficit`** = how many more tokens are needed to reach `1.0`. With `0.4` tokens, `deficit = 0.6`.
+- **`retryAfter`** = `deficit / rate` (amount ÷ rate = time). At `2` tokens/s that's `0.6 / 2 = 0.3s`.
+
+So instead of telling every blocked client the naive "wait `1/rate` from empty," we return the
+**minimum honest wait**: retry exactly when a token becomes spendable — no earlier (would just 429
+again), no later (wasted time). Units check out: `tokens ÷ (tokens/second) = seconds`.
+
+The `Allow` branch uses the same fractional idea in reverse for `X-RateLimit-Reset`: `secondsToFull
+= (Capacity - Tokens) / rate` — when the bucket would be brimming again.
+
 ---
 
 ## 2. Leaky bucket — "smooth the output to a constant rate"
@@ -52,6 +75,37 @@ else:
 Because `TAT` advances by exactly `T` on every accept, releases come out spaced `T` apart — that is
 the **smooth output**, regardless of how bursty the arrivals were. `RateLimitResult.ResetsAt`
 carries each accepted request's scheduled release instant, which the harness/dashboard visualise.
+
+### Worked example (this is the code with numbers in it)
+
+Config: `capacity = 5`, `rate = 2/s`. So `T = 1/2 = 500ms` and
+`burstTolerance = (capacity-1) × T = 4 × 500ms = 2000ms`. `TAT` starts at `MinValue` (empty bucket).
+
+**A burst of 6 requests all arriving at `t = 0`:**
+
+| req | now | `scheduledRelease = max(TAT, now)` | `queueDelay` | ≤ 2000ms? | outcome | new `TAT` | remaining |
+|---|---|---|---|---|---|---|---|
+| 1 | 0 | max(MinValue, 0) = **0**   | 0    | yes | ACCEPT, release@0ms    | 500  | 4 |
+| 2 | 0 | max(500, 0) = **500**      | 500  | yes | ACCEPT, release@500ms  | 1000 | 3 |
+| 3 | 0 | max(1000, 0) = **1000**    | 1000 | yes | ACCEPT, release@1000ms | 1500 | 2 |
+| 4 | 0 | max(1500, 0) = **1500**    | 1500 | yes | ACCEPT, release@1500ms | 2000 | 1 |
+| 5 | 0 | max(2000, 0) = **2000**    | 2000 | yes (=) | ACCEPT, release@2000ms | 2500 | 0 |
+| 6 | 0 | max(2500, 0) = **2500**    | 2500 | **no** | **DROP** | 2500 (unchanged) | 0 |
+
+So exactly `capacity = 5` are admitted from the instantaneous burst, and their release times are
+`0, 500, 1000, 1500, 2000ms` — evenly spaced by `T`, i.e. smooth output at 2/s. The 6th overflows.
+
+For that dropped request, `retryAfter = queueDelay - burstTolerance = 2500 - 2000 = 500ms` — retry
+in half a second, when one slot will have drained.
+
+**`remaining` header math** for req 2: after accepting, `TAT = 1000`, so
+`depthAfter = (TAT - now)/T = (1000 - 0)/500 = 2` requests queued, and `remaining = capacity -
+ceil(depthAfter) = 5 - 2 = 3`.
+
+**Recovery** — say the client waits and sends req 7 at `t = 1000ms` (TAT is still `2500`):
+`scheduledRelease = max(2500, 1000) = 2500`, `queueDelay = 2500 - 1000 = 1500 ≤ 2000` → ACCEPT.
+The 1000ms that elapsed = 2 intervals drained, so the bucket had room again. That's the leak
+working: capacity returns at the fixed rate.
 
 Why GCRA over a literal `Queue<Request>`? O(1) state instead of O(capacity), no dequeue timer, and
 it's the same algorithm ATM networks and Redis's `CL.THROTTLE` use. A literal queue is easier to

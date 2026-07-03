@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using RateLimiting.Abstractions;
 
 namespace Level2.SlidingWindowLog;
@@ -40,11 +41,13 @@ public sealed class SlidingWindowLogRateLimiter : IRateLimiter
 {
     private readonly SlidingWindowLogOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly ILogger? _logger;
     private readonly long _windowMs; // window size in milliseconds
 
     private readonly ConcurrentDictionary<string, Log> _logs = new();
 
-    public SlidingWindowLogRateLimiter(SlidingWindowLogOptions options, TimeProvider timeProvider)
+    // Logger is optional so unit tests can construct the limiter without a DI container.
+    public SlidingWindowLogRateLimiter(SlidingWindowLogOptions options, TimeProvider timeProvider, ILogger? logger = null)
     {
         if (options.Limit <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), "Limit must be positive.");
@@ -53,6 +56,7 @@ public sealed class SlidingWindowLogRateLimiter : IRateLimiter
 
         _options = options;
         _timeProvider = timeProvider;
+        _logger = logger;
         _windowMs = (long)options.Window.TotalMilliseconds;
     }
 
@@ -60,30 +64,41 @@ public sealed class SlidingWindowLogRateLimiter : IRateLimiter
     {
         ArgumentException.ThrowIfNullOrEmpty(key);
 
+        // Numbers below trace limit=5, window=10s (_windowMs=10000). Five requests arrive at t=0ms,
+        // a 6th also at t=0ms, then a 7th at t=11000ms.
         var nowMs = _timeProvider.GetUtcNow().ToUnixTimeMilliseconds();
         var log = _logs.GetOrAdd(key, _ => new Log());
 
         lock (log.SyncRoot)
         {
+            // Drop timestamps older than (now - window). At t=0 nothing to drop; at t=11000 the
+            // threshold is 11000-10000=1000, so all five t=0 entries are evicted (queue -> empty).
             EvictOlderThanWindow(log.Timestamps, nowMs);
 
-            if (log.Timestamps.Count < _options.Limit)
+            if (log.Timestamps.Count < _options.Limit)   // req1: 0<5 ... req5: 4<5 (yes); req6: 5<5 (no)
             {
-                log.Timestamps.Enqueue(nowMs);
-                var remaining = _options.Limit - log.Timestamps.Count;
+                log.Timestamps.Enqueue(nowMs);                       // queue grows [0], [0,0], ... [0,0,0,0,0]
+                var remaining = _options.Limit - log.Timestamps.Count; // req1:4  req2:3  req3:2  req4:1  req5:0
 
                 // The current window "resets" (frees a slot) when the OLDEST entry exits it.
+                // oldest=0, resetsAt = 0 + 10000 = 10000ms (t=10s).
                 var oldest = log.Timestamps.Peek();
                 var resetsAt = DateTimeOffset.FromUnixTimeMilliseconds(oldest + _windowMs);
+                _logger?.LogInformation(
+                    "SLIDING ALLOW {Key}  count={Count}/{Limit}  remaining={Remaining}  oldestAgeMs={AgeMs}",
+                    key, log.Timestamps.Count, _options.Limit, remaining, nowMs - oldest);
                 return Task.FromResult(RateLimitResult.Allow(_options.Limit, remaining, resetsAt));
             }
 
-            // At capacity. The next slot opens when the oldest in-window request slides out, i.e.
-            // at (oldest + window). That is exactly how long the caller must wait.
+            // At capacity (req6 at t=0: count=5). The next slot opens when the oldest in-window
+            // request slides out: oldest=0, slotOpensAt = 0 + 10000 = 10000ms, retryAfter = 10000-0 = 10s.
             var oldestBlocked = log.Timestamps.Peek();
             var slotOpensAtMs = oldestBlocked + _windowMs;
             var retryAfter = TimeSpan.FromMilliseconds(Math.Max(0, slotOpensAtMs - nowMs));
             var resetsAtBlocked = DateTimeOffset.FromUnixTimeMilliseconds(slotOpensAtMs);
+            _logger?.LogWarning(
+                "SLIDING BLOCK {Key}  count={Count}/{Limit}  retryAfter={RetryAfter}",
+                key, log.Timestamps.Count, _options.Limit, retryAfter);
             return Task.FromResult(RateLimitResult.Block(_options.Limit, resetsAtBlocked, retryAfter));
         }
     }

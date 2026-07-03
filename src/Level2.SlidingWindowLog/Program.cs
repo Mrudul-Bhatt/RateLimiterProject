@@ -3,6 +3,16 @@ using RateLimiting.Abstractions;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Console logs with a millisecond timestamp on every line, so you can see WHEN each decision
+// happened (and watch the trailing window slide as timestamps age out).
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(o =>
+{
+    o.TimestampFormat = "HH:mm:ss.fff ";
+    o.UseUtcTimestamp = true;
+    o.SingleLine = true;
+});
+
 // --- Rate limiter wiring ---------------------------------------------------
 var limit = builder.Configuration.GetValue("RateLimit:Limit", 5L);
 var windowSeconds = builder.Configuration.GetValue("RateLimit:WindowSeconds", 10);
@@ -10,7 +20,11 @@ var options = new SlidingWindowLogOptions(limit, TimeSpan.FromSeconds(windowSeco
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(options);
-builder.Services.AddSingleton<IRateLimiter, SlidingWindowLogRateLimiter>();
+// Factory registration so we can pass the limiter a named logger (it logs each ALLOW/BLOCK).
+builder.Services.AddSingleton<IRateLimiter>(sp => new SlidingWindowLogRateLimiter(
+    sp.GetRequiredService<SlidingWindowLogOptions>(),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger("SlidingWindow")));
 
 // The cleanup sweep that fixed window never needed. Short interval here so it's easy to observe.
 builder.Services.AddHostedService(sp => new SlidingWindowLogCleanupService(

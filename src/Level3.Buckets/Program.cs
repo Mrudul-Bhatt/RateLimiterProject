@@ -2,6 +2,16 @@ using Level3.Buckets;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Console logs, but with a timestamp on every line so you can see WHEN each decision happened
+// (essential for reading the leaky bucket's smoothed release cadence). SingleLine keeps it compact.
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(o =>
+{
+    o.TimestampFormat = "HH:mm:ss.fff ";
+    o.UseUtcTimestamp = true;
+    o.SingleLine = true;
+});
+
 // Two limiters side by side, deliberately given the SAME capacity + rate so the only thing that
 // differs is the algorithm. Defaults chosen to make the burst-vs-smooth contrast easy to see by hand.
 var capacity = builder.Configuration.GetValue("RateLimit:Capacity", 5);
@@ -9,9 +19,13 @@ var rate = builder.Configuration.GetValue("RateLimit:RatePerSecond", 2.0);
 
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(sp => new TokenBucketRateLimiter(
-    new TokenBucketOptions(capacity, rate), sp.GetRequiredService<TimeProvider>()));
+    new TokenBucketOptions(capacity, rate),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger("TokenBucket")));
 builder.Services.AddSingleton(sp => new LeakyBucketRateLimiter(
-    new LeakyBucketOptions(capacity, rate), sp.GetRequiredService<TimeProvider>()));
+    new LeakyBucketOptions(capacity, rate),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger("LeakyBucket")));
 
 var app = builder.Build();
 

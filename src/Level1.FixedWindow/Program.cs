@@ -3,6 +3,16 @@ using RateLimiting.Abstractions;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Console logs with a millisecond timestamp on every line, so you can see WHEN each decision
+// happened (and watch a burst all land inside the same window).
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(o =>
+{
+    o.TimestampFormat = "HH:mm:ss.fff ";
+    o.UseUtcTimestamp = true;
+    o.SingleLine = true;
+});
+
 // --- Rate limiter wiring ---------------------------------------------------
 // Limit/window are read from configuration so they can be tuned without a rebuild,
 // with small defaults that make the boundary burst easy to observe by hand.
@@ -13,7 +23,11 @@ var options = new FixedWindowOptions(limit, TimeSpan.FromSeconds(windowSeconds))
 // TimeProvider.System is the real clock in production; tests inject a FakeTimeProvider.
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton(options);
-builder.Services.AddSingleton<IRateLimiter, FixedWindowRateLimiter>();
+// Factory registration so we can pass the limiter a named logger (it logs each ALLOW/BLOCK).
+builder.Services.AddSingleton<IRateLimiter>(sp => new FixedWindowRateLimiter(
+    sp.GetRequiredService<FixedWindowOptions>(),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<ILoggerFactory>().CreateLogger("FixedWindow")));
 
 var app = builder.Build();
 

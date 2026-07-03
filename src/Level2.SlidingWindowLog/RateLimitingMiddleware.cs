@@ -11,16 +11,11 @@ public sealed class RateLimitingMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly IRateLimiter _limiter;
-    private readonly ILogger<RateLimitingMiddleware> _logger;
 
-    public RateLimitingMiddleware(
-        RequestDelegate next,
-        IRateLimiter limiter,
-        ILogger<RateLimitingMiddleware> logger)
+    public RateLimitingMiddleware(RequestDelegate next, IRateLimiter limiter)
     {
         _next = next;
         _limiter = limiter;
-        _logger = logger;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -33,6 +28,8 @@ public sealed class RateLimitingMiddleware
         }
 
         var key = ResolveClientKey(context);
+        // The decision (ALLOW/BLOCK) is logged inside the limiter itself, with its internals
+        // (count in window, oldest age). The middleware just turns the decision into HTTP.
         var result = await _limiter.CheckAsync(key, context.RequestAborted);
 
         context.Response.OnStarting(() =>
@@ -46,16 +43,9 @@ public sealed class RateLimitingMiddleware
 
         if (result.Allowed)
         {
-            _logger.LogInformation(
-                "ALLOW  {Key} {Method} {Path}  remaining={Remaining}/{Limit}",
-                key, context.Request.Method, context.Request.Path, result.Remaining, result.Limit);
             await _next(context);
             return;
         }
-
-        _logger.LogWarning(
-            "BLOCK  {Key} {Method} {Path}  limit={Limit} retryAfter={RetryAfter}",
-            key, context.Request.Method, context.Request.Path, result.Limit, result.RetryAfter);
 
         var retryAfterSeconds = (int)Math.Ceiling((result.RetryAfter ?? TimeSpan.Zero).TotalSeconds);
         context.Response.StatusCode = StatusCodes.Status429TooManyRequests;

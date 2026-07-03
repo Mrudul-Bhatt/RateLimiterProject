@@ -20,16 +20,11 @@ public sealed class RateLimitingMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly IRateLimiter _limiter;
-    private readonly ILogger<RateLimitingMiddleware> _logger;
 
-    public RateLimitingMiddleware(
-        RequestDelegate next,
-        IRateLimiter limiter,
-        ILogger<RateLimitingMiddleware> logger)
+    public RateLimitingMiddleware(RequestDelegate next, IRateLimiter limiter)
     {
         _next = next;
         _limiter = limiter;
-        _logger = logger;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -44,22 +39,9 @@ public sealed class RateLimitingMiddleware
         }
 
         var key = ResolveClientKey(context);
+        // The decision (ALLOW/BLOCK) is logged inside the limiter itself, with its internals
+        // (count, window). The middleware just turns the decision into HTTP.
         var result = await _limiter.CheckAsync(key, context.RequestAborted);
-
-        // Make every decision observable in the console. Allowed -> Information, blocked -> Warning,
-        // so a burst lights up clearly in the logs as it crosses the limit.
-        if (result.Allowed)
-        {
-            _logger.LogInformation(
-                "ALLOW  {Key} {Method} {Path}  remaining={Remaining}/{Limit} resetsAt={ResetsAt:HH:mm:ss}",
-                key, context.Request.Method, context.Request.Path, result.Remaining, result.Limit, result.ResetsAt);
-        }
-        else
-        {
-            _logger.LogWarning(
-                "BLOCK  {Key} {Method} {Path}  limit={Limit} retryAfter={RetryAfter}",
-                key, context.Request.Method, context.Request.Path, result.Limit, result.RetryAfter);
-        }
 
         // Headers must be written before the response body starts. OnStarting fires just before
         // the first byte is flushed, which guarantees they land even on the success path where a
