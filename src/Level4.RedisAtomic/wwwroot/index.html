@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Level 4 — Redis Atomic Rate Limiter (live)</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --ink:#e6edf3; --muted:#8b98a5;
+          --ok:#2ea043; --block:#f85149; --line:#30363d; --accent:#58a6ff; --fixed:#d29922; --sliding:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+  .pill { padding:1px 8px; border-radius:10px; font-size:11px; }
+  .pill.on { background:#16321f; color:#7ee787; } .pill.off { background:#3a1d1d; color:#ffa198; }
+  .controls { padding:14px 24px; border-bottom:1px solid var(--line); }
+  button { font:inherit; background:#21262d; color:var(--ink); border:1px solid var(--line);
+           border-radius:6px; padding:8px 12px; cursor:pointer; margin-right:8px; }
+  button:hover { border-color:var(--accent); }
+  .wrap { display:grid; grid-template-columns: 1fr 1fr; gap:16px; padding:16px 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .panel h2 { font-size:13px; margin:0 0 4px; } .fixed h2 { color:var(--fixed); } .sliding h2 { color:var(--sliding); }
+  .panel .tag { font-size:11px; color:var(--muted); margin-bottom:10px; }
+  .gauges { display:flex; gap:20px; align-items:flex-end; margin-bottom:10px; }
+  .gauge .num { font-size:30px; font-weight:700; } .gauge .lbl { color:var(--muted); font-size:11px; text-transform:uppercase; }
+  canvas { width:100%; height:70px; display:block; background:#0b0f14; border-radius:6px; }
+  table { width:100%; border-collapse:collapse; margin-top:6px; } th,td { text-align:left; padding:5px 8px; border-bottom:1px solid #161b22; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; }
+  .legend { color:var(--muted); font-size:11px; margin-top:6px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align:middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Level 4 — Redis Atomic Rate Limiter <span style="color:var(--muted)">· distributed, shared state</span></h1>
+  <div class="sub">state lives in Redis (<span id="redisPill" class="pill off">redis: ?</span>) so the limit
+    holds across N instances · limit <b id="cfgLimit">?</b> / <b id="cfgWindow">?</b>s · atomic via Lua</div>
+</header>
+
+<div class="controls">
+  <button onclick="fire('fixed',1)">Fixed +1</button>
+  <button onclick="fire('fixed',10)">Fixed burst 10</button>
+  <button onclick="fire('sliding',1)">Sliding +1</button>
+  <button onclick="fire('sliding',10)">Sliding burst 10</button>
+  <button onclick="clearAll()">Clear</button>
+  <span class="legend" style="margin-left:12px">
+    <span class="dot" style="background:var(--ok)"></span> allowed &nbsp;
+    <span class="dot" style="background:var(--block)"></span> 429</span>
+</div>
+
+<div class="wrap">
+  <div class="panel fixed">
+    <h2>Redis Fixed Window</h2>
+    <div class="tag">INCR + PEXPIRE in one Lua script · TTL resets the window &amp; expires idle keys (no cleanup job)</div>
+    <div class="gauges">
+      <div class="gauge"><div class="num" id="fAcc">0</div><div class="lbl">allowed</div></div>
+      <div class="gauge"><div class="num" id="fRej" style="color:var(--block)">0</div><div class="lbl">429</div></div>
+    </div>
+    <canvas id="fCanvas"></canvas>
+  </div>
+  <div class="panel sliding">
+    <h2>Redis Sliding Window</h2>
+    <div class="tag">sorted set: ZREMRANGEBYSCORE + ZCARD + ZADD in one Lua script · precise, no boundary burst</div>
+    <div class="gauges">
+      <div class="gauge"><div class="num" id="sAcc">0</div><div class="lbl">allowed</div></div>
+      <div class="gauge"><div class="num" id="sRej" style="color:var(--block)">0</div><div class="lbl">429</div></div>
+    </div>
+    <canvas id="sCanvas"></canvas>
+  </div>
+
+  <div class="panel" style="grid-column:1/-1">
+    <h2 style="font-size:12px;color:var(--muted);text-transform:uppercase">Live Redis keys (the shared source of truth)</h2>
+    <table>
+      <thead><tr><th>key</th><th>count</th><th>ttl (s)</th></tr></thead>
+      <tbody id="stateBody"><tr><td colspan="3" style="color:var(--muted)">no keys yet — send a request</td></tr></tbody>
+    </table>
+    <p class="legend">These keys are what every app instance reads/writes. TTL counting down = the window
+      expiring; when it hits 0 the key vanishes (self-cleanup). Open this page in two tabs — they share these counters.</p>
+  </div>
+</div>
+
+<script>
+const S = { fixed:{ev:[],acc:0,rej:0}, sliding:{ev:[],acc:0,rej:0} };
+const VISIBLE_MS = 15000;
+
+async function fire(kind, n) {
+  const url = kind === 'fixed' ? '/api/fixed' : '/api/sliding';
+  await Promise.all(Array.from({length:n}, () => hit(kind, url)));
+}
+async function hit(kind, url) {
+  try {
+    const res = await fetch(url);
+    const ok = res.status === 200;
+    const s = S[kind];
+    s.ev.push({ t: Date.now(), ok }); ok ? s.acc++ : s.rej++;
+    document.getElementById(kind==='fixed'?'fAcc':'sAcc').textContent = s.acc;
+    document.getElementById(kind==='fixed'?'fRej':'sRej').textContent = s.rej;
+  } catch (e) {}
+}
+function clearAll() {
+  for (const k of ['fixed','sliding']) { S[k].ev=[]; S[k].acc=0; S[k].rej=0; }
+  ['fAcc','fRej','sAcc','sRej'].forEach(id => document.getElementById(id).textContent = 0);
+}
+
+async function poll() {
+  try {
+    const res = await fetch('/debug/state'); const st = await res.json();
+    document.getElementById('cfgLimit').textContent = st.limit;
+    document.getElementById('cfgWindow').textContent = st.windowSeconds;
+    const pill = document.getElementById('redisPill');
+    pill.textContent = 'redis: ' + (st.connected ? 'connected' : 'down');
+    pill.className = 'pill ' + (st.connected ? 'on' : 'off');
+
+    const rows = [...st.fixedKeys, ...st.slidingKeys];
+    const body = document.getElementById('stateBody');
+    body.innerHTML = rows.length
+      ? rows.map(k => `<tr><td>${k.key}</td><td>${k.count}</td><td>${k.ttlSeconds!=null?k.ttlSeconds.toFixed(1):'–'}</td></tr>`).join('')
+      : '<tr><td colspan="3" style="color:var(--muted)">no keys yet — send a request</td></tr>';
+  } catch (e) {}
+}
+setInterval(poll, 400); poll();
+
+function drawOne(id, s, color) {
+  const cv = document.getElementById(id); const dpr = window.devicePixelRatio||1;
+  const w = cv.clientWidth, h = cv.clientHeight; cv.width=w*dpr; cv.height=h*dpr;
+  const ctx = cv.getContext('2d'); ctx.scale(dpr,dpr); ctx.clearRect(0,0,w,h);
+  const now = Date.now(), t0 = now - VISIBLE_MS; const x = t => ((t-t0)/VISIBLE_MS)*w;
+  for (const e of s.ev) { if (e.t<t0) continue; ctx.fillStyle = e.ok?'#2ea043':'#f85149';
+    ctx.beginPath(); ctx.arc(x(e.t), h/2, 4, 0, Math.PI*2); ctx.fill(); }
+  while (s.ev.length && s.ev[0].t < now-VISIBLE_MS) s.ev.shift();
+  ctx.strokeStyle='#30363d'; ctx.beginPath(); ctx.moveTo(w-1,0); ctx.lineTo(w-1,h); ctx.stroke();
+}
+function draw(){ drawOne('fCanvas',S.fixed,'#d29922'); drawOne('sCanvas',S.sliding,'#58a6ff'); requestAnimationFrame(draw); }
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

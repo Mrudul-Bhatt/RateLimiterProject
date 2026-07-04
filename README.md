@@ -12,9 +12,12 @@ RateLimiterProject/
 ├── src/Level1.FixedWindow/             # L1: fixed-window counter
 ├── src/Level2.SlidingWindowLog/        # L2: sliding-window log
 ├── src/Level3.Buckets/                 # L3: token bucket & leaky bucket
+├── src/Level4.RedisAtomic/             # L4: Redis-backed atomic counter (Lua)
+├── docker-compose.yml                  # Redis (L4); Prometheus/Grafana added at L7
 ├── bench/MemoryBenchmark/              # L1 vs L2 memory footprint harness
 ├── bench/BucketComparison/            # L3 token-vs-leaky output comparison
-└── tests/                              # Level1.Tests, Level2.Tests, Level3.Tests
+├── bench/RaceConditionDemo/           # L4 in-memory-vs-Redis race + latency
+└── tests/                              # Level1..Level4 .Tests
 ```
 
 ## Build & test
@@ -139,4 +142,39 @@ they differ in **output shaping** — token releases immediately, leaky paces it
 
 ---
 
-*Next: Level 4 — Redis-backed atomic counter: correctness across N instances via Lua atomicity. This is where "single-process only" finally gets fixed.*
+## Level 4 — Redis-backed Atomic Counter ✅
+
+**Stack:** Redis 7 (Docker Compose), StackExchange.Redis, Lua, Testcontainers. Full notes: [Level-4.md](src/Level4.RedisAtomic/Level-4.md).
+
+### What it does
+Moves limiter state out of process memory into **Redis**, shared by all instances, and runs the
+read-check-increment as an **atomic Lua script** on the server (one round trip, no TOCTOU race).
+Two limiters: `RedisFixedWindowRateLimiter` (INCR + PEXPIRE) and `RedisSlidingWindowRateLimiter`
+(sorted set: ZREMRANGEBYSCORE + ZCARD + ZADD). Scripts ship as embedded `.lua` resources.
+
+### The payoff (`dotnet run --project bench/RaceConditionDemo -c Release`)
+```
+Rate limit: 10 / 30s, sprayed across TWO instances
+  IN-MEMORY (2 instances):  20 allowed  ->  LIMIT VIOLATED
+  REDIS     (2 instances):  10 allowed  ->  held exactly
+Latency:  in-process ~0.2us   vs   redis ~0.5ms
+```
+
+### Two Level-2 costs disappear
+- **No cleanup job** — Redis TTL (`PEXPIRE`) expires idle keys automatically.
+- Plus the headline: correct across N instances, via Lua atomicity.
+
+### Tests (8, Testcontainers → real Redis; needs Docker)
+`Redis_fixed_window_is_atomic_under_concurrency` & sliding equivalent (500 concurrent → exactly the
+limit), `InMemory_limiter_violates_limit_across_instances` (the problem) vs
+`Redis_limiter_holds_limit_across_instances` (the fix), boundary-burst elimination, TTL reset.
+
+### Interview takeaway
+> Shared state alone just moves the race across the network; atomicity is the crux. A Lua script runs
+> read-check-incr-expire as one indivisible server-side op in a single round trip. TTL doubles as the
+> window reset and idle-key cleanup. Cost: a sub-ms round trip and a Redis dependency — which is why
+> Level 7 adds a circuit breaker + local fallback.
+
+---
+
+*Next: Level 5 — composable middleware with multi-key limits (per IP / user / API key), fail-fast ordering, and auth-aware + whitelist policies.*

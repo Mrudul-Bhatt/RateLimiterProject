@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\shared\RateLimiting.Abstractions\RateLimiting.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Level1.FixedWindow\Level1.FixedWindow.csproj" />
+    <ProjectReference Include="..\..\src\Level4.RedisAtomic\Level4.RedisAtomic.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" Version="3.0.11" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

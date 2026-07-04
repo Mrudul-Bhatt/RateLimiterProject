@@ -1,0 +1,18 @@
+# Level 4 infrastructure: a single Redis instance the app(s) share for distributed rate-limit state.
+# (Prometheus/Grafana get added here at Level 7.)
+#
+#   docker compose up -d        # start Redis on localhost:6379
+#   docker compose down         # stop it
+#
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ratelimiter-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
