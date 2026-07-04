@@ -12,7 +12,9 @@ RateLimiterProject/
 ├── src/Level1.FixedWindow/             # L1: fixed-window counter
 ├── src/Level2.SlidingWindowLog/        # L2: sliding-window log
 ├── src/Level3.Buckets/                 # L3: token bucket & leaky bucket
+├── src/RateLimiting.Redis/             # reusable Redis limiters + Lua (shared by L4/L5)
 ├── src/Level4.RedisAtomic/             # L4: Redis-backed atomic counter (Lua)
+├── src/Level5.Middleware/              # L5: composable multi-key middleware
 ├── docker-compose.yml                  # Redis (L4); Prometheus/Grafana added at L7
 ├── bench/MemoryBenchmark/              # L1 vs L2 memory footprint harness
 ├── bench/BucketComparison/            # L3 token-vs-leaky output comparison
@@ -177,4 +179,30 @@ limit), `InMemory_limiter_violates_limit_across_instances` (the problem) vs
 
 ---
 
-*Next: Level 5 — composable middleware with multi-key limits (per IP / user / API key), fail-fast ordering, and auth-aware + whitelist policies.*
+## Level 5 — Middleware with Multi-Key Limits ✅
+
+**Stack:** ASP.NET Core middleware + Redis (reuses the Level 4 limiters). Full notes: [Level-5.md](src/Level5.Middleware/Level-5.md).
+
+### What it does
+One middleware applies an ordered **chain** of limit policies — IP → anon → user → API key — and
+**fails fast** on the first violated dimension, naming it in `X-RateLimit-Dimension` and the 429 body.
+A policy is `{ Name, KeySelector, Limit, Window, Algorithm }`; a `null` key-selector skips the
+dimension, so one chain serves anonymous, authenticated, and api-key traffic.
+
+- **Auth-aware:** anonymous → tight per-IP limit; authenticated → higher per-user budget.
+- **Whitelist bypass:** `X-Internal-Token` skips all limiting for internal callers.
+- **Correct headers** on success and 429 (`X-RateLimit-Limit/Remaining/Reset/Dimension`, `Retry-After`).
+
+### Tests (5, WebApplicationFactory + Testcontainers Redis)
+`Applies_all_three_limiters_in_order`, `Returns_429_on_first_violated_dimension_with_correct_headers`,
+`Authenticated_user_gets_higher_limit_than_anonymous`, `Whitelisted_service_token_bypasses_limiting`,
+`Headers_present_on_successful_requests`.
+
+### Interview takeaway
+> Production limiting is multi-dimensional: a chain of policies, reject on the first violated one.
+> Order cheapest / most-likely-to-fail first (fail-fast still charges earlier dimensions). A null
+> key-selector cleanly skips a dimension. Know the header set — especially `Retry-After` vs `X-RateLimit-Reset`.
+
+---
+
+*Next: Level 6 — tiered limits & quota management (plans, concurrent per-minute/day/month windows, cost-based debits, and idempotent resets).*

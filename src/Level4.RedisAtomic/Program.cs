@@ -101,4 +101,6 @@ static async Task Decide(HttpContext ctx, Task<RateLimiting.Abstractions.RateLim
     await ctx.Response.WriteAsJsonAsync(new { ok = false, error = "rate_limit_exceeded", retryAfterSeconds });
 }
 
-public partial class Program;
+// Kept internal on purpose: Level 4 has no WebApplicationFactory tests, and a *public* Program here
+// would collide with Level 5's public Program (Level 5 references this assembly).
+internal partial class Program;

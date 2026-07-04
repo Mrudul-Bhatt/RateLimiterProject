@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Level 5 — Multi-Key Rate Limiting (live)</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --ink:#e6edf3; --muted:#8b98a5;
+          --ok:#2ea043; --block:#f85149; --line:#30363d; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0; } header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+  .wrap { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 3px; }
+  input[type=text] { width:100%; background:#0b0f14; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  .radio { display:flex; gap:8px; margin-top:4px; } .radio label { display:flex; align-items:center; gap:5px; color:var(--ink); margin:0; }
+  button { font:inherit; background:#21262d; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:9px 12px; cursor:pointer; margin:12px 8px 0 0; }
+  button:hover { border-color:var(--accent); }
+  table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:6px 8px; border-bottom:1px solid #161b22; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; }
+  #log { height:340px; overflow:auto; border:1px solid var(--line); border-radius:6px; }
+  .row { display:flex; gap:12px; padding:4px 10px; border-bottom:1px solid #161b22; white-space:nowrap; }
+  .row.ok { color:#7ee787; } .row.block { color:#ffa198; } .row .t { color:var(--muted); }
+  .chip { padding:1px 7px; border-radius:10px; font-size:11px; background:#21314a; color:#9dc7ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Level 5 — Multi-Key Rate Limiting <span style="color:var(--muted)">· IP → anon → user → api key</span></h1>
+  <div class="sub">one middleware applies a CHAIN of Redis-backed limits and fails fast on the first violated dimension</div>
+</header>
+
+<div class="wrap">
+  <div class="panel">
+    <h2>Who are you?</h2>
+    <div class="radio">
+      <label><input type="radio" name="idn" value="anon" checked onchange="mode()"> Anonymous</label>
+      <label><input type="radio" name="idn" value="user" onchange="mode()"> Authenticated</label>
+    </div>
+    <label>X-User-Id (authenticated)</label>
+    <input id="userId" type="text" value="alice" disabled />
+    <label>X-Api-Key (optional)</label>
+    <input id="apiKey" type="text" placeholder="(none)" />
+    <label><input type="checkbox" id="internal"> send internal bypass token</label>
+
+    <div>
+      <button onclick="fire(1)">Send 1</button>
+      <button onclick="fire(10)">Burst 10</button>
+      <button onclick="clearLog()">Clear</button>
+    </div>
+
+    <h2 style="margin-top:18px">Policy chain</h2>
+    <table><thead><tr><th>dimension</th><th>limit</th></tr></thead><tbody id="chain"></tbody></table>
+    <p style="color:var(--muted);font-size:11px">anon &amp; user are mutually exclusive — your identity
+      selects which applies. Watch the <span class="chip">dimension</span> chip to see which limit you hit.</p>
+  </div>
+
+  <div class="panel">
+    <h2>Requests (newest first)</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+function mode() {
+  const authed = document.querySelector('input[name=idn]:checked').value === 'user';
+  document.getElementById('userId').disabled = !authed;
+}
+async function poll() {
+  try {
+    const s = await (await fetch('/debug/state')).json();
+    document.getElementById('chain').innerHTML = s.chain.map(c =>
+      `<tr><td>${c.name}</td><td>${c.limit}</td></tr>`).join('');
+  } catch (e) {}
+}
+poll();
+
+async function fire(n) { await Promise.all(Array.from({length:n}, hit)); }
+
+async function hit() {
+  const headers = {};
+  const authed = document.querySelector('input[name=idn]:checked').value === 'user';
+  if (authed) headers['X-User-Id'] = document.getElementById('userId').value || 'alice';
+  const key = document.getElementById('apiKey').value.trim();
+  if (key) headers['X-Api-Key'] = key;
+  if (document.getElementById('internal').checked) headers['X-Internal-Token'] = 'internal-secret';
+
+  try {
+    const res = await fetch('/api/resource', { headers });
+    const ok = res.status === 200;
+    const dim = res.headers.get('X-RateLimit-Dimension') || '—';
+    const rem = res.headers.get('X-RateLimit-Remaining');
+    const ra = res.headers.get('Retry-After');
+    addRow(ok, dim, rem, ra, authed, key, headers['X-Internal-Token']);
+  } catch (e) {}
+}
+
+function addRow(ok, dim, rem, ra, authed, key, internal) {
+  const log = document.getElementById('log');
+  const d = document.createElement('div');
+  d.className = 'row ' + (ok ? 'ok' : 'block');
+  const now = new Date();
+  const who = internal ? 'internal' : (authed ? 'user' : 'anon') + (key ? '+key' : '');
+  d.innerHTML = `<span class="t">${now.toLocaleTimeString()}.${String(now.getMilliseconds()).padStart(3,'0')}</span>`
+    + `<span>${ok ? '200 OK  ' : '429 BLOCK'}</span>`
+    + `<span class="chip">${who}</span>`
+    + `<span>dimension: <b>${dim}</b></span>`
+    + (rem !== null ? `<span>remaining ${rem}</span>` : '')
+    + (ra ? `<span>retry-after ${ra}s</span>` : '');
+  log.prepend(d);
+  while (log.children.length > 300) log.removeChild(log.lastChild);
+}
+function clearLog() { document.getElementById('log').innerHTML = ''; }
+</script>
+</body>
+</html>

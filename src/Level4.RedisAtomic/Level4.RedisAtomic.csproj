@@ -2,16 +2,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\shared\RateLimiting.Abstractions\RateLimiting.Abstractions.csproj" />
+    <ProjectReference Include="..\RateLimiting.Redis\RateLimiting.Redis.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="StackExchange.Redis" Version="3.0.11" />
-  </ItemGroup>
-
-  <!-- Lua scripts shipped as embedded resources, loaded via the assembly manifest at startup. -->
-  <ItemGroup>
-    <EmbeddedResource Include="Scripts\fixed_window.lua" />
-    <EmbeddedResource Include="Scripts\sliding_window.lua" />
   </ItemGroup>
 
   <PropertyGroup>

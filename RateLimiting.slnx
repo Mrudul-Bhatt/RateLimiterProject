@@ -12,11 +12,14 @@
     <Project Path="src/Level2.SlidingWindowLog/Level2.SlidingWindowLog.csproj" />
     <Project Path="src/Level3.Buckets/Level3.Buckets.csproj" />
     <Project Path="src/Level4.RedisAtomic/Level4.RedisAtomic.csproj" />
+    <Project Path="src/Level5.Middleware/Level5.Middleware.csproj" />
+    <Project Path="src/RateLimiting.Redis/RateLimiting.Redis.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Level1.Tests/Level1.Tests.csproj" />
     <Project Path="tests/Level2.Tests/Level2.Tests.csproj" />
     <Project Path="tests/Level3.Tests/Level3.Tests.csproj" />
     <Project Path="tests/Level4.Tests/Level4.Tests.csproj" />
+    <Project Path="tests/Level5.Tests/Level5.Tests.csproj" />
   </Folder>
 </Solution>
