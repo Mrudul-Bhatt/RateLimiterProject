@@ -19,6 +19,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Scripts\fixed_window.lua" />
     <EmbeddedResource Include="Scripts\sliding_window.lua" />
+    <EmbeddedResource Include="Scripts\cost_window.lua" />
   </ItemGroup>
 
 </Project>

@@ -37,7 +37,10 @@ public sealed class SimulatedAuthMiddleware
         if (!string.IsNullOrEmpty(userId))
         {
             var identity = new ClaimsIdentity(
-                new[] { new Claim(ClaimTypes.NameIdentifier, userId) }, authenticationType: "Simulated");
+                [new Claim(ClaimTypes.NameIdentifier, userId)],
+                authenticationType: "Simulated"
+            );
+
             context.User = new ClaimsPrincipal(identity);
         }
 

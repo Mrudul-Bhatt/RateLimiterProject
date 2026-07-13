@@ -15,7 +15,8 @@ RateLimiterProject/
 ├── src/RateLimiting.Redis/             # reusable Redis limiters + Lua (shared by L4/L5)
 ├── src/Level4.RedisAtomic/             # L4: Redis-backed atomic counter (Lua)
 ├── src/Level5.Middleware/              # L5: composable multi-key middleware
-├── docker-compose.yml                  # Redis (L4); Prometheus/Grafana added at L7
+├── src/Level6.TieredQuota/             # L6: tiered quotas (Redis + Postgres/EF Core)
+├── docker-compose.yml                  # Redis + Postgres; Prometheus/Grafana added at L7
 ├── bench/MemoryBenchmark/              # L1 vs L2 memory footprint harness
 ├── bench/BucketComparison/            # L3 token-vs-leaky output comparison
 ├── bench/RaceConditionDemo/           # L4 in-memory-vs-Redis race + latency
@@ -205,4 +206,31 @@ dimension, so one chain serves anonymous, authenticated, and api-key traffic.
 
 ---
 
-*Next: Level 6 — tiered limits & quota management (plans, concurrent per-minute/day/month windows, cost-based debits, and idempotent resets).*
+## Level 6 — Tiered Limits & Quota Management ✅
+
+**Stack:** Redis (hot windows) + PostgreSQL/EF Core (durable ledger). Full notes: [Level-6.md](src/Level6.TieredQuota/Level-6.md).
+
+### What it does
+Enforces **three concurrent windows** per request, shortest-first with short-circuit:
+per-minute + per-day (Redis rate caps) + per-month **cost-based credit budget** (Postgres, the
+billing source of truth). `/api/basic` debits 1 credit; `/api/image` debits 10.
+
+- **Hot vs durable split:** disposable minute/day counters in Redis; billing-relevant monthly balance in Postgres.
+- **Plans** (Free/Pro/Enterprise) with per-tier limits + **overage policy**: Free hard-blocks, paid tiers meter (allow + record).
+- **Cost-based debit:** Lua `INCRBY cost` (Redis) and atomic `UPDATE` (Postgres).
+- **Idempotent resets** off an injected clock: daily via date-keyed Redis, monthly via a sweep + lazy-on-access.
+- **Audited admin API** (`POST /admin/quota/{user}`) to change tier / reset / grant credits.
+
+### Tests (6, Testcontainers Postgres + Redis + WebApplicationFactory)
+`Free_tier_blocked_at_lower_limit_than_pro`, `Per_minute_limit_trips_before_daily`,
+`Image_request_debits_10_credits`, `Daily_quota_resets_at_midnight_utc`,
+`Paid_tier_allows_metered_overage`, `Admin_can_adjust_user_quota_and_it_is_audited`.
+
+### Interview takeaway
+> Multiple concurrent windows enforced shortest-first: rate caps in Redis (cheap, TTL'd), a durable
+> cost-based monthly credit ledger in Postgres. Overage is a per-plan policy. Resets run off an
+> injected clock and are idempotent so the job and lazy path coexist. Every manual quota edit is audited.
+
+---
+
+*Next: Level 7 — gateway enforcement + observability (YARP, Prometheus/Grafana, OpenTelemetry tracing, and the fail-open-vs-fail-closed circuit breaker with a local fallback to the Level 1–3 limiters).*

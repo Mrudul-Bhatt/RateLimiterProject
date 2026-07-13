@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Level 6 — Tiered Quotas (live)</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --ink:#e6edf3; --muted:#8b98a5;
+          --ok:#2ea043; --block:#f85149; --line:#30363d; --accent:#58a6ff; --credit:#a371f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0; } header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+  .wrap { display:grid; grid-template-columns: 360px 1fr; gap:16px; padding:16px 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:16px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 3px; }
+  input[type=text] { width:100%; background:#0b0f14; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  button { font:inherit; background:#21262d; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:8px 12px; cursor:pointer; margin:8px 8px 0 0; }
+  button:hover { border-color:var(--accent); }
+  .tierbadge { font-size:20px; font-weight:700; }
+  .bar { height:12px; background:#21262d; border-radius:6px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; background:var(--credit); transition:width .3s; }
+  table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:6px 8px; border-bottom:1px solid #161b22; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; }
+  #log { height:300px; overflow:auto; border:1px solid var(--line); border-radius:6px; }
+  .row { display:flex; gap:12px; padding:4px 10px; border-bottom:1px solid #161b22; white-space:nowrap; }
+  .row.ok { color:#7ee787; } .row.block { color:#ffa198; } .row .t { color:var(--muted); }
+  .chip { padding:1px 7px; border-radius:10px; font-size:11px; background:#2b2140; color:#d2b8ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Level 6 — Tiered Limits &amp; Quotas <span style="color:var(--muted)">· plans · concurrent windows · cost-based credits</span></h1>
+  <div class="sub">per-minute &amp; per-day rate windows (Redis) + a durable monthly CREDIT budget (Postgres) · basic=1 credit, image=10</div>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <h2>Caller</h2>
+      <label>X-User-Id</label>
+      <input id="user" type="text" value="demo" onchange="poll()" />
+      <div style="margin-top:12px">
+        <div>tier: <span class="tierbadge" id="tier">–</span></div>
+        <div style="margin-top:8px;color:var(--muted);font-size:12px">monthly credits <span id="creditText">–</span></div>
+        <div class="bar"><div id="creditBar" style="width:0%"></div></div>
+      </div>
+      <div>
+        <button onclick="call('/api/basic')">Basic call (1 credit)</button>
+        <button onclick="call('/api/image')">Image call (10 credits)</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Admin (customer success)</h2>
+      <button onclick="admin({setTier:'Free'})">Set Free</button>
+      <button onclick="admin({setTier:'Pro'})">Set Pro</button>
+      <button onclick="admin({setTier:'Enterprise'})">Set Enterprise</button>
+      <button onclick="admin({resetMonth:true})">Reset month</button>
+      <button onclick="admin({grantCredits:500})">Grant 500</button>
+      <p style="color:var(--muted);font-size:11px">Every change is written to an audit trail (who/what/when).</p>
+    </div>
+
+    <div class="panel">
+      <h2>Plans</h2>
+      <table><thead><tr><th>tier</th><th>rpm</th><th>rpd</th><th>credits/mo</th><th>overage</th></tr></thead>
+      <tbody id="plans"></tbody></table>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Requests (newest first) — watch which window blocks</h2>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+const ADMIN = 'admin-secret';
+const u = () => document.getElementById('user').value || 'demo';
+
+async function poll() {
+  try {
+    const s = await (await fetch('/debug/state?user=' + encodeURIComponent(u()))).json();
+    document.getElementById('plans').innerHTML = s.plans.map(p =>
+      `<tr><td>${p.tier}</td><td>${p.requestsPerMinute}</td><td>${p.requestsPerDay}</td><td>${p.monthlyCredits.toLocaleString()}</td><td>${p.overage}</td></tr>`).join('');
+    const a = s.account;
+    if (a) {
+      const plan = s.plans.find(p => p.tier === a.tier);
+      document.getElementById('tier').textContent = a.tier;
+      const pct = plan ? Math.min(100, a.monthCreditsUsed / plan.monthlyCredits * 100) : 0;
+      document.getElementById('creditText').textContent = `${a.monthCreditsUsed.toLocaleString()} / ${(plan?.monthlyCredits ?? 0).toLocaleString()}`;
+      const bar = document.getElementById('creditBar');
+      bar.style.width = pct + '%';
+      bar.style.background = pct >= 100 ? 'var(--block)' : pct > 75 ? '#e3b341' : 'var(--credit)';
+    } else {
+      document.getElementById('tier').textContent = '(no account yet)';
+      document.getElementById('creditText').textContent = '–';
+      document.getElementById('creditBar').style.width = '0%';
+    }
+  } catch (e) {}
+}
+setInterval(poll, 800); poll();
+
+async function call(path) {
+  try {
+    const res = await fetch(path, { headers: { 'X-User-Id': u() } });
+    const body = await res.json().catch(() => ({}));
+    addRow(res, body);
+    poll();
+  } catch (e) {}
+}
+
+async function admin(change) {
+  await fetch('/admin/quota/' + encodeURIComponent(u()), {
+    method: 'POST',
+    headers: { 'X-Admin-Token': ADMIN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(change)
+  });
+  poll();
+}
+
+function addRow(res, body) {
+  const ok = res.status === 200;
+  const log = document.getElementById('log');
+  const d = document.createElement('div');
+  d.className = 'row ' + (ok ? 'ok' : 'block');
+  const now = new Date();
+  const window = res.headers.get('X-RateLimit-Window');
+  const overage = res.headers.get('X-Quota-Month-Overage');
+  d.innerHTML = `<span class="t">${now.toLocaleTimeString()}</span>`
+    + `<span>${ok ? '200 OK  ' : '429 BLOCK'}</span>`
+    + `<span class="chip">${body.tier ?? '?'}</span>`
+    + (ok ? `<span>cost ${body.cost}</span><span>month ${body.monthUsed}/${body.monthLimit}</span>` : `<span>window: <b>${window}</b></span>`)
+    + (overage ? `<span style="color:#e3b341">overage ${overage}</span>` : '');
+  log.prepend(d);
+  while (log.children.length > 300) log.removeChild(log.lastChild);
+}
+</script>
+</body>
+</html>
