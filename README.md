@@ -16,7 +16,10 @@ RateLimiterProject/
 ├── src/Level4.RedisAtomic/             # L4: Redis-backed atomic counter (Lua)
 ├── src/Level5.Middleware/              # L5: composable multi-key middleware
 ├── src/Level6.TieredQuota/             # L6: tiered quotas (Redis + Postgres/EF Core)
-├── docker-compose.yml                  # Redis + Postgres; Prometheus/Grafana added at L7
+├── src/Level7.Gateway/                 # L7: edge gateway (YARP) + resilience + observability
+├── src/Level7.Backend/                 # L7: the protected backend service
+├── config/                             # L7: Prometheus, Grafana dashboards, alert rules
+├── docker-compose.yml                  # Redis + Postgres + Prometheus + Grafana
 ├── bench/MemoryBenchmark/              # L1 vs L2 memory footprint harness
 ├── bench/BucketComparison/            # L3 token-vs-leaky output comparison
 ├── bench/RaceConditionDemo/           # L4 in-memory-vs-Redis race + latency
@@ -233,4 +236,34 @@ billing source of truth). `/api/basic` debits 1 credit; `/api/image` debits 10.
 
 ---
 
-*Next: Level 7 — gateway enforcement + observability (YARP, Prometheus/Grafana, OpenTelemetry tracing, and the fail-open-vs-fail-closed circuit breaker with a local fallback to the Level 1–3 limiters).*
+## Level 7 — Gateway Enforcement + Observability ✅
+
+**Stack:** YARP + Polly v8 + prometheus-net + OpenTelemetry. Full notes: [Level-7.md](src/Level7.Gateway/Level-7.md).
+
+### What it does
+Moves enforcement to the **edge**: a YARP gateway rate-limits **before forwarding** to the backend
+(rejected requests never reach it), instrumented for production.
+
+- **Circuit breaker on Redis (Polly v8)** with a configurable degrade mode — **fail-open** / **fail-closed** / **local-fallback**.
+- **The payoff:** local-fallback degrades to the **in-process Level 1 fixed-window limiter** — the early levels return as the graceful-degradation safety net.
+- **Four golden metrics** at `/metrics` (prometheus-net) + a checked-in **Grafana dashboard** + **alert rules**.
+- **Distributed tracing** (OpenTelemetry): a `rate_limit.check` span tagged with the decision (result/source/key/remaining).
+- **k6 load script** for the ~10k rps check.
+
+### Tests (7, WebApplicationFactory + a stub limiter — no containers)
+`Gateway_enforces_limit_before_forwarding`, `Metrics_increment_on_allow_and_reject`,
+`Trace_contains_limiter_decision_attributes`, `Redis_down_fails_open_when_configured` /
+`..._fails_closed_...`, `Local_fallback_limiter_engages_on_redis_outage`.
+
+### Interview takeaway
+> Enforce at the edge (one hop, zero per-service cost); instrument with the four golden metrics and
+> trace each decision. For a Redis outage, give a business-risk answer: fail-open, fail-closed, or a
+> circuit breaker that degrades to a cheap in-process limiter — literally Level 1, closing the loop.
+
+---
+
+## 🏁 Roadmap complete
+
+All seven levels built, tested, documented, and dashboarded — from a naive in-memory counter to a
+distributed, observable, gracefully-degrading edge gateway. Each level's `Level-N.md` captures the
+flaw it exposed, the fix, and the interview takeaway.

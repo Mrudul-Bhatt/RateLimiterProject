@@ -1,10 +1,14 @@
 # Rate-limiter infrastructure.
-#   Redis    — hot-path counters (L4+): shared, atomic rate-limit state.
-#   Postgres — durable source of truth (L6): plans, quota ledger, audit trail.
-# (Prometheus/Grafana get added here at Level 7.)
+#   Redis      — hot-path counters (L4+): shared, atomic rate-limit state.
+#   Postgres   — durable source of truth (L6): plans, quota ledger, audit trail.
+#   Prometheus — scrapes the L7 gateway's /metrics.
+#   Grafana    — dashboards over Prometheus (login admin/admin), http://localhost:3000
 #
-#   docker compose up -d        # start Redis (6379) + Postgres (5432)
+#   docker compose up -d        # Redis(6379) Postgres(5432) Prometheus(9090) Grafana(3000)
 #   docker compose down         # stop them
+#
+# Prometheus scrapes the gateway at host.docker.internal:5097 — run it with:
+#   dotnet run --project src/Level7.Gateway --urls http://localhost:5097
 #
 services:
   redis:
@@ -33,3 +37,30 @@ services:
       interval: 2s
       timeout: 3s
       retries: 10
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ratelimiter-prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config/prometheus:/etc/prometheus:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ratelimiter-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
