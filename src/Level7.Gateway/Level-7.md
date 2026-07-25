@@ -100,17 +100,75 @@ no Redis.
 
 ---
 
-## 7. Run it
+## 7. Interactive dashboard — testing every scenario without touching Docker
+
+Levels 1–6 each had a `wwwroot/index.html` you could click through. Level 7's is different in one
+important way: the *interesting* scenarios here aren't "send a burst" (you've seen that six times) —
+they're "what does the gateway do while Redis is unreachable?" Normally that means `docker stop
+ratelimiter-redis` mid-demo, which is awkward to narrate and easy to forget to undo.
+
+So the dashboard (served at `/`) adds two **runtime toggles**, backed by
+[RuntimeControls.cs](./RuntimeControls.cs) and two POST endpoints:
+
+- **`POST /debug/simulate-outage { enabled }`** — flips `OutageSimulator.Enabled`. When on,
+  `ResilientRateLimiter` throws *inside* the same Polly pipeline delegate a real Redis exception
+  would hit — so the circuit breaker trips for real, `rate_limit_circuit_open` goes to 1, and the
+  exact same code path runs as a genuine outage. Nothing about the failure handling is faked; only
+  the trigger is.
+- **`POST /debug/degrade-mode { mode }`** — flips `DegradeModeSwitch.Mode` live, so you can change
+  fail-open → fail-closed → local-fallback *while already degraded* and watch the same failure
+  handled three different ways, no restart.
+
+**A full scripted demo, verified end-to-end:**
+
+```bash
+curl -s http://localhost:5097/api/resource                                          # source=redis
+curl -sX POST -d '{"enabled":true}'  -H 'Content-Type: application/json' \
+  http://localhost:5097/debug/simulate-outage
+for i in 1 2 3; do curl -s http://localhost:5097/api/resource -D - -o /dev/null \
+  | grep X-RateLimit-Source; done                                                   # trips after ~3
+curl -s http://localhost:5097/debug/state | grep circuitOpen                        # true
+curl -sX POST -d '{"mode":"FailClosed"}' -H 'Content-Type: application/json' \
+  http://localhost:5097/debug/degrade-mode                                          # switch live
+curl -s http://localhost:5097/api/resource -D - -o /dev/null | grep -E '429|source'
+curl -sX POST -d '{"enabled":false}' -H 'Content-Type: application/json' \
+  http://localhost:5097/debug/simulate-outage                                       # "Redis recovers"
+sleep 6                                                                              # past BreakDuration
+curl -s http://localhost:5097/api/resource -D - -o /dev/null | grep X-RateLimit-Source  # back to redis
+```
+
+That's every acceptance-test scenario, driven live, in one sequence. The dashboard wraps this in
+buttons: a status panel (circuit state / mode / outage flag), burst controls, a mode selector, and a
+running log where each row's chip shows `redis` / `local_fallback` / `fail_open` / `fail_closed`.
+
+**For the fully authentic version** (no simulation, the real container down): `docker stop
+ratelimiter-redis`, drive traffic, then `docker start ratelimiter-redis` and watch it recover. The
+simulator exists so you don't *have to* do that mid-demo — but doing it for real once is worth it to
+convince yourself the simulator isn't cheating.
+
+---
+
+## 8. Run it
 
 ```bash
 docker compose up -d                                                    # Redis, Postgres, Prometheus, Grafana
 dotnet run --project src/Level7.Backend  --urls http://localhost:5099   # the protected backend
 ASPNETCORE_ENVIRONMENT=Proxy \
   dotnet run --project src/Level7.Gateway --urls http://localhost:5097  # gateway (forwards to backend)
+```
 
+Open **http://localhost:5097/** for the dashboard, or drive it from the shell:
+
+```bash
 curl http://localhost:5097/api/resource        # 200 (forwarded) until the limit, then 429 at the edge
 open http://localhost:9090                      # Prometheus
 open http://localhost:3000                      # Grafana (admin/admin) → "Rate Limiter — Gateway"
+```
+
+For a heavier, sustained-throughput check, use k6 instead of clicking buttons:
+
+```bash
+k6 run bench/k6/load-test.js                    # ramps toward ~10k rps against the gateway
 ```
 
 Config: `Gateway:{Limit,WindowSeconds,DegradeMode}`, `Gateway:Fallback:Limit`, `Redis:ConnectionString`,

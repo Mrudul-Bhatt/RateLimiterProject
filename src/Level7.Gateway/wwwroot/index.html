@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Level 7 — Gateway (live)</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a2029; --ink:#e6edf3; --muted:#8b98a5;
+          --ok:#2ea043; --block:#f85149; --line:#30363d; --accent:#58a6ff; --warn:#e3b341; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--ink); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); }
+  h1 { font-size:16px; margin:0; } header .sub { color:var(--muted); font-size:12px; margin-top:4px; }
+  .wrap { display:grid; grid-template-columns: 360px 1fr; gap:16px; padding:16px 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:16px; }
+  .panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 10px; }
+  button { font:inherit; background:#21262d; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:8px 12px; cursor:pointer; margin:0 8px 8px 0; }
+  button:hover { border-color:var(--accent); }
+  button.danger { border-color:#5c2020; } button.danger:hover { border-color:var(--block); }
+  button.on { background:#16321f; border-color:#2ea043; color:#7ee787; }
+  button.off-danger { background:#3a1d1d; border-color:var(--block); color:#ffa198; }
+  .row-inline { display:flex; flex-wrap:wrap; align-items:center; gap:4px 0; }
+  .kv { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #161b22; font-size:12.5px; }
+  .kv b { color:var(--ink); } .kv span { color:var(--muted); }
+  .pill { padding:2px 9px; border-radius:10px; font-size:11px; font-weight:600; }
+  .pill.healthy { background:#16321f; color:#7ee787; }
+  .pill.degraded { background:#3a2a1a; color:#e3b341; }
+  .pill.down { background:#3a1d1d; color:#ffa198; }
+  #log { height:420px; overflow:auto; border:1px solid var(--line); border-radius:6px; }
+  .r { display:flex; gap:12px; padding:4px 10px; border-bottom:1px solid #161b22; white-space:nowrap; }
+  .r.ok { color:#7ee787; } .r.block { color:#ffa198; } .r .t { color:var(--muted); }
+  .chip { padding:1px 7px; border-radius:10px; font-size:11px; }
+  .chip.redis { background:#16321f; color:#7ee787; }
+  .chip.local_fallback { background:#2b2140; color:#d2b8ff; }
+  .chip.fail_open { background:#3a2a1a; color:#e3b341; }
+  .chip.fail_closed { background:#3a1d1d; color:#ffa198; }
+  .stats { display:flex; gap:18px; flex-wrap:wrap; }
+  .stat .num { font-size:26px; font-weight:700; } .stat .lbl { color:var(--muted); font-size:11px; text-transform:uppercase; }
+  .legend { color:var(--muted); font-size:11px; margin-top:6px; line-height:1.5; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Level 7 — Edge Gateway <span style="color:var(--muted)">· enforcement, resilience, observability</span></h1>
+  <div class="sub">requests are rate-limited HERE, before forwarding · toggle the scenarios below to
+    watch the circuit breaker degrade and recover — no Docker commands needed</div>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="panel">
+      <h2>Status</h2>
+      <div class="kv"><span>Redis limiter</span><b id="circuitPill">–</b></div>
+      <div class="kv"><span>Degrade mode</span><b id="modeText">–</b></div>
+      <div class="kv"><span>Simulated outage</span><b id="outageText">–</b></div>
+      <div class="kv"><span>Limit</span><b id="limitText">–</b></div>
+    </div>
+
+    <div class="panel">
+      <h2>1 · Drive traffic</h2>
+      <div class="row-inline">
+        <button onclick="fire(1)">Send 1</button>
+        <button onclick="fire(10)">Burst 10</button>
+        <button onclick="fire(50)">Burst 50 (concurrent)</button>
+        <button onclick="clearLog()">Clear log</button>
+      </div>
+      <p class="legend">Fires at <code>/api/resource</code> through the gateway. Watch the source
+        chip on each row: <span class="chip redis">redis</span> = normal,
+        <span class="chip local_fallback">local_fallback</span> /
+        <span class="chip fail_open">fail_open</span> /
+        <span class="chip fail_closed">fail_closed</span> = degraded.</p>
+    </div>
+
+    <div class="panel">
+      <h2>2 · Simulate a Redis outage</h2>
+      <div class="row-inline">
+        <button id="outageBtn" class="danger" onclick="toggleOutage()">Simulate outage: OFF</button>
+      </div>
+      <p class="legend">Makes the gateway's Redis call throw <i>inside</i> the same Polly pipeline a
+        real outage would hit — so the circuit breaker trips for real. After ~3 failed calls in 10s
+        the breaker opens; while open, decisions degrade instantly (no Redis timeout per request).
+        Turn this off and fire a few more requests once the 5s cool-off passes to watch it recover.</p>
+    </div>
+
+    <div class="panel">
+      <h2>3 · Degrade mode (what happens while down)</h2>
+      <div class="row-inline">
+        <button id="mode-FailOpen" onclick="setMode('FailOpen')">Fail Open</button>
+        <button id="mode-FailClosed" onclick="setMode('FailClosed')">Fail Closed</button>
+        <button id="mode-LocalFallback" onclick="setMode('LocalFallback')">Local Fallback</button>
+      </div>
+      <p class="legend">
+        <b>Fail Open</b> — allow everything (availability over protection).<br>
+        <b>Fail Closed</b> — reject everything (protection over availability).<br>
+        <b>Local Fallback</b> — degrade to an in-process Level-1 limiter (graceful; the roadmap's payoff).<br>
+        Change this while outage is ON to see the same failure handled 3 different ways.
+      </p>
+    </div>
+
+    <div class="panel">
+      <h2>Links</h2>
+      <div class="legend">
+        <a href="/metrics" target="_blank">/metrics</a> (Prometheus scrape) ·
+        <a href="http://localhost:9090" target="_blank">Prometheus</a> ·
+        <a href="http://localhost:3000" target="_blank">Grafana</a> (admin/admin)
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Requests (newest first)</h2>
+    <div class="stats" style="margin-bottom:10px">
+      <div class="stat"><div class="num" id="sTotal">0</div><div class="lbl">sent</div></div>
+      <div class="stat"><div class="num" id="sAllowed" style="color:var(--ok)">0</div><div class="lbl">allowed</div></div>
+      <div class="stat"><div class="num" id="sBlocked" style="color:var(--block)">0</div><div class="lbl">blocked</div></div>
+      <div class="stat"><div class="num" id="sDegraded" style="color:var(--warn)">0</div><div class="lbl">degraded</div></div>
+    </div>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+let stats = { total:0, allowed:0, blocked:0, degraded:0 };
+
+async function fire(n) { await Promise.all(Array.from({length:n}, hit)); }
+
+async function hit() {
+  stats.total++;
+  try {
+    const res = await fetch('/api/resource');
+    const ok = res.status === 200;
+    const source = res.headers.get('X-RateLimit-Source') || '?';
+    const degraded = source !== 'redis';
+    ok ? stats.allowed++ : stats.blocked++;
+    if (degraded) stats.degraded++;
+    addRow(ok, source, degraded, res.headers.get('X-RateLimit-Remaining'), res.headers.get('Retry-After'));
+  } catch (e) {
+    stats.blocked++;
+    addRow(false, 'network-error', true, null, null);
+  }
+  renderStats();
+}
+
+function addRow(ok, source, degraded, remaining, retryAfter) {
+  const log = document.getElementById('log');
+  const d = document.createElement('div');
+  d.className = 'r ' + (ok ? 'ok' : 'block');
+  const now = new Date();
+  d.innerHTML = `<span class="t">${now.toLocaleTimeString()}.${String(now.getMilliseconds()).padStart(3,'0')}</span>`
+    + `<span>${ok ? '200 OK  ' : '429 BLOCK'}</span>`
+    + `<span class="chip ${source}">${source}</span>`
+    + (remaining !== null ? `<span>remaining ${remaining}</span>` : '')
+    + (retryAfter ? `<span>retry-after ${retryAfter}s</span>` : '')
+    + (degraded ? `<span style="color:var(--warn)">DEGRADED</span>` : '');
+  log.prepend(d);
+  while (log.children.length > 400) log.removeChild(log.lastChild);
+}
+
+function renderStats() {
+  document.getElementById('sTotal').textContent = stats.total;
+  document.getElementById('sAllowed').textContent = stats.allowed;
+  document.getElementById('sBlocked').textContent = stats.blocked;
+  document.getElementById('sDegraded').textContent = stats.degraded;
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+  stats = { total:0, allowed:0, blocked:0, degraded:0 };
+  renderStats();
+}
+
+async function toggleOutage() {
+  const btn = document.getElementById('outageBtn');
+  const turningOn = !btn.classList.contains('off-danger');
+  await fetch('/debug/simulate-outage', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ enabled: turningOn })
+  });
+  poll();
+}
+
+async function setMode(mode) {
+  await fetch('/debug/degrade-mode', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ mode })
+  });
+  poll();
+}
+
+async function poll() {
+  try {
+    const s = await (await fetch('/debug/state')).json();
+    document.getElementById('modeText').textContent = s.degradeMode;
+    document.getElementById('outageText').textContent = s.simulatedOutage ? 'ON (simulated)' : 'off';
+    document.getElementById('limitText').textContent = `${s.limit} / ${s.windowSeconds}s`;
+
+    const pill = document.getElementById('circuitPill');
+    if (s.circuitOpen) { pill.textContent = 'CIRCUIT OPEN — degraded'; pill.className = 'pill down'; }
+    else if (s.simulatedOutage) { pill.textContent = 'failing — tripping soon'; pill.className = 'pill degraded'; }
+    else { pill.textContent = 'healthy'; pill.className = 'pill healthy'; }
+
+    const outBtn = document.getElementById('outageBtn');
+    if (s.simulatedOutage) { outBtn.textContent = 'Simulate outage: ON'; outBtn.classList.add('off-danger'); }
+    else { outBtn.textContent = 'Simulate outage: OFF'; outBtn.classList.remove('off-danger'); }
+
+    for (const m of ['FailOpen','FailClosed','LocalFallback']) {
+      document.getElementById('mode-' + m).classList.toggle('on', s.degradeMode === m);
+    }
+  } catch (e) {}
+}
+setInterval(poll, 700);
+poll();
+</script>
+</body>
+</html>

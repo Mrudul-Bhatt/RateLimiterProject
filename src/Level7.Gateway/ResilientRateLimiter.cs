@@ -30,16 +30,19 @@ public sealed class ResilientRateLimiter
 {
     private readonly IRateLimiter _redis;
     private readonly IRateLimiter _localFallback;
-    private readonly DegradeMode _mode;
+    private readonly DegradeModeSwitch _modeSwitch;
+    private readonly OutageSimulator _outageSimulator;
     private readonly ILogger<ResilientRateLimiter> _logger;
     private readonly ResiliencePipeline<RateLimitResult> _pipeline;
 
     public ResilientRateLimiter(
-        IRateLimiter redis, IRateLimiter localFallback, DegradeMode mode, ILogger<ResilientRateLimiter> logger)
+        IRateLimiter redis, IRateLimiter localFallback, DegradeModeSwitch modeSwitch,
+        OutageSimulator outageSimulator, ILogger<ResilientRateLimiter> logger)
     {
         _redis = redis;
         _localFallback = localFallback;
-        _mode = mode;
+        _modeSwitch = modeSwitch;
+        _outageSimulator = outageSimulator;
         _logger = logger;
 
         _pipeline = new ResiliencePipelineBuilder<RateLimitResult>()
@@ -58,14 +61,22 @@ public sealed class ResilientRateLimiter
             .Build();
     }
 
-    public DegradeMode Mode => _mode;
+    public DegradeMode Mode => _modeSwitch.Mode;
 
     public async Task<GatewayDecision> EvaluateAsync(string key, CancellationToken ct = default)
     {
         try
         {
             var sw = Stopwatch.GetTimestamp();
-            var result = await _pipeline.ExecuteAsync(async token => await _redis.CheckAsync(key, token), ct);
+            var result = await _pipeline.ExecuteAsync(async token =>
+            {
+                // Demo hook: pretend Redis is down. Thrown INSIDE the pipeline delegate so Polly's
+                // circuit breaker sees it exactly like a real failure — same trip/cool-off/recover
+                // behaviour, no special-casing needed anywhere else.
+                if (_outageSimulator.Enabled)
+                    throw new InvalidOperationException("Simulated Redis outage (toggled via /debug/simulate-outage)");
+                return await _redis.CheckAsync(key, token);
+            }, ct);
             GatewayTelemetry.RedisCallDuration.Observe(Stopwatch.GetElapsedTime(sw).TotalSeconds);
             return new GatewayDecision(result, Source: "redis", Degraded: false);
         }
@@ -77,12 +88,13 @@ public sealed class ResilientRateLimiter
 
     private async Task<GatewayDecision> DegradeAsync(string key, Exception cause, CancellationToken ct)
     {
+        var mode = _modeSwitch.Mode;
         // Loud, so a degraded gateway is obvious in logs and dashboards — never silent.
         _logger.LogWarning(cause,
             "Redis limiter unavailable — DEGRADING via {Mode} for key {Key} ({Cause})",
-            _mode, key, cause.GetType().Name);
+            mode, key, cause.GetType().Name);
 
-        switch (_mode)
+        switch (mode)
         {
             case DegradeMode.FailOpen:
                 // Allow, with sentinel headers (-1) so clients/dashboards can tell it was degraded.
