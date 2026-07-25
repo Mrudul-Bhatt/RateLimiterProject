@@ -8,6 +8,30 @@ Stack: YARP (reverse proxy) + Polly v8 (circuit breaker) + prometheus-net + Open
 
 ---
 
+## 0. Two setup gotchas worth knowing
+
+**`dotnet run` silently overrides `ASPNETCORE_ENVIRONMENT`.** `Properties/launchSettings.json`
+hardcodes `"ASPNETCORE_ENVIRONMENT": "Development"` for its profiles, and `dotnet run` applies that
+*after* whatever you set on the command line — so `ASPNETCORE_ENVIRONMENT=Proxy dotnet run ...`
+silently runs as `Development` anyway. Add `--no-launch-profile` to skip it:
+
+```bash
+ASPNETCORE_ENVIRONMENT=Proxy dotnet run --project src/Level7.Gateway --no-launch-profile --urls http://localhost:5097
+```
+
+Check the startup banner — it should print `Hosting environment: Proxy`, not `Development`. If it
+doesn't, the override is still winning.
+
+**`UseStaticFiles` defers to an already-matched endpoint.** ASP.NET Core auto-inserts `UseRouting()`
+as the very first middleware if you never call it explicitly. That means routing can match `/` to an
+endpoint *before* `UseStaticFiles` gets a turn — and static-file middleware's rule is: if the request
+already has a matched endpoint, don't serve a file, defer to it. Level 7 is the only level with a
+route that also matches `/` (YARP's `{**catch-all}` and `MapFallback`), so it's the only one that hit
+this — Levels 1–6 never had a competing route at `/`. Fix: call `app.UseRouting()` explicitly, placed
+*after* `UseStaticFiles()` (see [Program.cs](./Program.cs)) so static files always get first refusal.
+
+---
+
 ## 1. Edge enforcement
 
 Levels 1–6 enforced *inside* each service. Here a single **gateway** enforces once, at the front
@@ -152,9 +176,11 @@ convince yourself the simulator isn't cheating.
 
 ```bash
 docker compose up -d                                                    # Redis, Postgres, Prometheus, Grafana
-dotnet run --project src/Level7.Backend  --urls http://localhost:5099   # the protected backend
-ASPNETCORE_ENVIRONMENT=Proxy \
-  dotnet run --project src/Level7.Gateway --urls http://localhost:5097  # gateway (forwards to backend)
+dotnet run --project src/Level7.Backend --urls http://localhost:5099    # the protected backend
+
+# --no-launch-profile is required — see the gotcha in §0, otherwise ASPNETCORE_ENVIRONMENT is
+# silently overridden back to "Development" by launchSettings.json.
+ASPNETCORE_ENVIRONMENT=Proxy dotnet run --project src/Level7.Gateway --no-launch-profile --urls http://localhost:5097
 ```
 
 Open **http://localhost:5097/** for the dashboard, or drive it from the shell:

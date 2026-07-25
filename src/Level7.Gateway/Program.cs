@@ -68,6 +68,13 @@ var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
+// Explicit UseRouting, positioned AFTER static files: without this, ASP.NET Core auto-inserts
+// routing as the very FIRST middleware, which lets it match "/" to the YARP catch-all route before
+// UseStaticFiles gets a turn — and static-file middleware defers to an already-matched endpoint
+// rather than serving a file. Levels 1-6 never hit this because none of them had a route that also
+// matched "/"; Level 7's YARP catch-all + MapFallback do.
+app.UseRouting();
+
 // Edge enforcement runs before everything downstream (proxy included).
 app.UseMiddleware<GatewayRateLimitingMiddleware>();
 
